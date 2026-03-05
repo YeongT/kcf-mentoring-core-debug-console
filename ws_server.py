@@ -118,6 +118,7 @@ class WebSocketServer(QObject):
         self._port = port
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server = None
         self._running = False
 
     @property
@@ -147,25 +148,31 @@ class WebSocketServer(QObject):
             return
         self._running = False
         if self._loop:
+            if self._server:
+                self._loop.call_soon_threadsafe(self._server.close)
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=3)
         self._thread = None
         self._loop = None
+        self._server = None
 
     def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
         try:
-            self._loop.run_until_complete(self._setup())
+            loop.run_until_complete(self._setup())
         except OSError as e:
             self._connection.log_message.emit(f"Server start failed: {e}")
             self._running = False
             self.server_failed.emit(str(e))
+            loop.close()
             return
         self._running = True
         self.server_started.emit()
-        self._loop.run_forever()
+        loop.run_forever()
+        loop.close()
 
     async def _setup(self) -> None:
         self._server = await serve(

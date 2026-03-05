@@ -1,5 +1,7 @@
 """Main window layout assembling all panels."""
 
+import os
+import tempfile
 import time
 
 from PyQt6.QtWidgets import (
@@ -18,7 +20,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QPixmap, QPainter, QColor, QPolygon
 
 from protocol import (
     parse_status,
@@ -26,11 +28,22 @@ from protocol import (
     parse_lidar_frame,
     parse_response,
     DeviceStatus,
+    DeviceInfo,
+    LidarInfo,
+    LidarHealth,
+    CameraInfo,
     InitAckSettings,
     INIT_FLAG_START_STREAM,
     CMD_GET_STATUS,
+    CMD_GET_DEVICE_INFO,
+    CMD_LIDAR_GET_INFO,
+    CMD_LIDAR_GET_HEALTH,
+    CMD_LIDAR_SET_SCAN_MODE,
+    CMD_CAMERA_GET_INFO,
+    SCAN_MODE_NAMES,
 )
 from ws_server import DeviceConnection, WebSocketServer
+import settings
 
 from gui.camera_panel import CameraPanel
 from gui.lidar_panel import LidarPanel
@@ -48,7 +61,8 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1200, 920)
 
-        self._status_poll_interval = 2000  # ms, 0 = off (device pushes)
+        self._settings = settings.load()
+        self._status_poll_interval = self._settings.get("status_poll_interval", 5000)
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
 
@@ -64,8 +78,29 @@ class MainWindow(QMainWindow):
         self._resize_edge: str = ""  # "", "left", "right", "top", "bottom", combos
         self._EDGE_MARGIN = 6
 
+        self._create_arrow_icons()
         self._init_ui()
         self._connect_signals()
+
+    def _create_arrow_icons(self) -> None:
+        icon_dir = os.path.join(tempfile.gettempdir(), "kcf_debug_icons")
+        os.makedirs(icon_dir, exist_ok=True)
+        color = QColor("#B0BEC5")
+        arrows = {
+            "up": [QPoint(4, 0), QPoint(0, 4), QPoint(8, 4)],
+            "dn": [QPoint(0, 0), QPoint(8, 0), QPoint(4, 4)],
+        }
+        for name, points in arrows.items():
+            pix = QPixmap(9, 5)
+            pix.fill(QColor(0, 0, 0, 0))
+            p = QPainter(pix)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawPolygon(QPolygon(points))
+            p.end()
+            path = os.path.join(icon_dir, f"{name}.png")
+            pix.save(path)
+            setattr(self, f"_arrow_{name}", path.replace("\\", "/"))
 
     def _init_ui(self) -> None:
         central = QWidget()
@@ -193,7 +228,7 @@ class MainWindow(QMainWindow):
         # ============================================================
         #  Dark theme
         # ============================================================
-        self.setStyleSheet("""
+        stylesheet = """
             QMainWindow {
                 background-color: #121212;
                 color: #E0E0E0;
@@ -246,7 +281,36 @@ class MainWindow(QMainWindow):
                 color: #E0E0E0;
                 border: 1px solid #444;
                 border-radius: 3px;
-                padding: 3px;
+                padding: 2px;
+                padding-right: 18px;
+            }
+            QSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 16px;
+                border-left: 1px solid #444;
+                background-color: #2a2a2a;
+                border-top-right-radius: 3px;
+            }
+            QSpinBox::up-button:hover { background-color: #3a3a3a; }
+            QSpinBox::up-button:pressed { background-color: #555; }
+            QSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 16px;
+                border-left: 1px solid #444;
+                background-color: #2a2a2a;
+                border-bottom-right-radius: 3px;
+            }
+            QSpinBox::down-button:hover { background-color: #3a3a3a; }
+            QSpinBox::down-button:pressed { background-color: #555; }
+            QSpinBox::up-arrow {
+                image: url(ARROW_UP_PATH);
+                width: 9px; height: 5px;
+            }
+            QSpinBox::down-arrow {
+                image: url(ARROW_DN_PATH);
+                width: 9px; height: 5px;
             }
             QTextEdit {
                 background-color: #0a0a0a;
@@ -256,7 +320,29 @@ class MainWindow(QMainWindow):
             QLabel {
                 color: #B0BEC5;
             }
-        """)
+            QCheckBox {
+                color: #B0BEC5;
+                spacing: 4px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #1a1a1a;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #1565C0;
+                border-color: #1976D2;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #2a2a2a;
+            }
+        """
+        stylesheet = stylesheet.replace("ARROW_UP_PATH", self._arrow_up)
+        stylesheet = stylesheet.replace("ARROW_DN_PATH", self._arrow_dn)
+        self.setStyleSheet(stylesheet)
 
         # Apply initial view mode
         self._set_view_mode("split")
@@ -342,6 +428,43 @@ class MainWindow(QMainWindow):
         if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= 17:
             status = DeviceStatus.from_bytes(resp.payload)
             self._status_panel.update_status(status)
+        elif resp.cmd_id == CMD_GET_DEVICE_INFO and resp.ok:
+            info = DeviceInfo.from_bytes(resp.payload)
+            if info:
+                self._conn.log_message.emit(
+                    f"DeviceInfo: {info.device_name} | chip={info.chip_model} "
+                    f"cores={info.chip_cores} rev={info.chip_revision} | "
+                    f"heap={info.free_heap // 1024}K/{info.min_free_heap // 1024}K | "
+                    f"PSRAM={info.psram_total // (1024*1024)}M free={info.psram_free // (1024*1024)}M | "
+                    f"RSSI={info.wifi_rssi}dBm"
+                )
+        elif resp.cmd_id == CMD_LIDAR_GET_INFO and resp.ok:
+            info = LidarInfo.from_bytes(resp.payload)
+            if info:
+                self._command_panel.update_lidar_info(info)
+                self._conn.log_message.emit(
+                    f"LidarInfo: model={info.major_model} FW={info.firmware_str} "
+                    f"HW={info.hardware} Serial={info.serial}"
+                )
+        elif resp.cmd_id == CMD_LIDAR_GET_HEALTH and resp.ok:
+            health = LidarHealth.from_bytes(resp.payload)
+            if health:
+                self._command_panel.update_lidar_health(health)
+                self._conn.log_message.emit(
+                    f"LidarHealth: {health.status_name} (error_code={health.error_code})"
+                )
+        elif resp.cmd_id == CMD_LIDAR_SET_SCAN_MODE and resp.ok:
+            if len(resp.payload) >= 1:
+                mode = resp.payload[0]
+                name = SCAN_MODE_NAMES.get(mode, f"Unknown({mode})")
+                self._conn.log_message.emit(f"Scan mode set to: {name}")
+        elif resp.cmd_id == CMD_CAMERA_GET_INFO and resp.ok:
+            info = CameraInfo.from_bytes(resp.payload)
+            if info:
+                self._conn.log_message.emit(
+                    f"CameraInfo: {info.model} | res={info.resolution} "
+                    f"quality={info.quality} streaming={'ON' if info.streaming else 'OFF'}"
+                )
 
     # ================================================================
     #  View mode switching
@@ -357,6 +480,9 @@ class MainWindow(QMainWindow):
         for m, btn in self._view_buttons.items():
             btn.setStyleSheet(self._VIEW_BTN_ON if m == mode else self._VIEW_BTN_OFF)
 
+        # Suppress repaints during reparenting to avoid white flash
+        self.setUpdatesEnabled(False)
+
         self._camera_panel.setVisible(mode in ("split", "camera"))
         self._lidar_panel.setVisible(mode in ("split", "lidar"))
 
@@ -364,18 +490,20 @@ class MainWindow(QMainWindow):
             # Full-width viz, controls at bottom
             self._right_widget.hide()
             self._status_panel.setMaximumWidth(16777215)
-            self._command_panel.set_sidebar_mode(False)
-            self._bottom_layout.addWidget(self._status_panel, 6)
-            self._bottom_layout.addWidget(self._command_panel, 4)
+            self._command_panel.set_sidebar_mode(False, "split")
+            self._bottom_layout.addWidget(self._status_panel, 5)
+            self._bottom_layout.addWidget(self._command_panel, 5)
             self._bottom_widget.show()
         else:
             # Single viz + right sidebar
             self._bottom_widget.hide()
             self._status_panel.setMaximumWidth(16777215)  # reset max
-            self._command_panel.set_sidebar_mode(True)
+            self._command_panel.set_sidebar_mode(True, mode)
             self._right_layout.addWidget(self._status_panel)
             self._right_layout.addWidget(self._command_panel, 1)
             self._right_widget.show()
+
+        self.setUpdatesEnabled(True)
 
     # ================================================================
     #  Frameless window dragging
@@ -514,43 +642,46 @@ class MainWindow(QMainWindow):
         form.setSpacing(10)
 
         # --- Status poll section ---
-        form.addWidget(QLabel("<b>Status Poll</b>"))
+        poll_label = QLabel("<b>Status Poll</b>")
+        form.addWidget(poll_label)
+
         poll_row = QHBoxLayout()
-        poll_row.addWidget(QLabel("Interval:"))
-        poll_spin = QSpinBox()
-        poll_spin.setRange(0, 10)
-        poll_spin.setValue(self._status_poll_interval // 1000)
-        poll_spin.setSuffix(" sec")
-        poll_spin.setToolTip("0 = disabled (device push only)")
-        poll_spin.setSpecialValueText("OFF")
-        poll_row.addWidget(poll_spin)
+        poll_row.setSpacing(0)
+        poll_presets = [("OFF", 0), ("1s", 1000), ("2s", 2000), ("5s", 5000), ("10s", 10000)]
+        poll_buttons: list[QPushButton] = []
 
-        btn_apply_poll = QPushButton("Apply")
-        btn_apply_poll.setStyleSheet("padding: 2px 10px; font-size: 11px;")
-        poll_row.addWidget(btn_apply_poll)
+        _POLL_BTN = "padding: 4px 0; font-size: 11px; border-radius: 0; border: 1px solid #444; min-width: 38px;"
+        _POLL_ON = _POLL_BTN + "background-color: #1565C0; color: white; border-color: #1976D2;"
+        _POLL_OFF = _POLL_BTN + "background-color: #1a1a1a; color: #888;"
+        _POLL_FIRST = " border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
+        _POLL_LAST = " border-top-right-radius: 4px; border-bottom-right-radius: 4px;"
 
-        poll_status = QLabel()
-        poll_status.setFont(QFont("Consolas", 8))
-        poll_status.setFixedHeight(14)
-        poll_row.addWidget(poll_status)
-
-        def on_apply_poll() -> None:
-            new_val = poll_spin.value() * 1000
-            if new_val == self._status_poll_interval:
+        def on_poll_select(ms: int) -> None:
+            if ms == self._status_poll_interval:
                 return
-            self._status_poll_interval = new_val
+            self._status_poll_interval = ms
             self._restart_status_timer()
-            if new_val > 0:
-                msg = f"Poll interval → {poll_spin.value()}s"
-            else:
-                msg = "Poll disabled (device push only)"
-            poll_status.setText(msg)
-            poll_status.setStyleSheet("color: #4CAF50;")
+            for b, (_, v) in zip(poll_buttons, poll_presets):
+                is_first = b is poll_buttons[0]
+                is_last = b is poll_buttons[-1]
+                base = _POLL_ON if v == ms else _POLL_OFF
+                extra = (_POLL_FIRST if is_first else "") + (_POLL_LAST if is_last else "")
+                b.setStyleSheet(base + extra)
+            msg = f"Poll interval → {ms // 1000}s" if ms > 0 else "Poll disabled (device push only)"
             self._conn.log_message.emit(f"Settings: {msg}")
-            QTimer.singleShot(2000, lambda: poll_status.setText(""))
+            self._save_settings()
 
-        btn_apply_poll.clicked.connect(on_apply_poll)
-        dlg.enter_actions[poll_spin] = on_apply_poll
+        for i, (label, ms) in enumerate(poll_presets):
+            btn = QPushButton(label)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            is_active = ms == self._status_poll_interval
+            base = _POLL_ON if is_active else _POLL_OFF
+            extra = (_POLL_FIRST if i == 0 else "") + (_POLL_LAST if i == len(poll_presets) - 1 else "")
+            btn.setStyleSheet(base + extra)
+            btn.clicked.connect(lambda _, m=ms: on_poll_select(m))
+            poll_buttons.append(btn)
+            poll_row.addWidget(btn)
+
         form.addLayout(poll_row)
 
         # --- Separator ---
@@ -577,20 +708,26 @@ class MainWindow(QMainWindow):
             btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
 
         def set_running_ui() -> None:
-            if btn_server.isVisible():
-                btn_server.setText("Stop Server")
-                btn_server.setStyleSheet("background-color: #F44336; color: white;")
-                btn_server.setEnabled(True)
-                port_spin.setEnabled(True)
+            try:
+                if btn_server.isVisible():
+                    btn_server.setText("Stop Server")
+                    btn_server.setStyleSheet("background-color: #F44336; color: white;")
+                    btn_server.setEnabled(True)
+                    port_spin.setEnabled(True)
+            except RuntimeError:
+                pass
             self._update_server_label()
             self._conn.log_message.emit(f"Server started on port {self._server.port}")
 
         def set_stopped_ui(error: str = "") -> None:
-            if btn_server.isVisible():
-                btn_server.setText("Start Server")
-                btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
-                btn_server.setEnabled(True)
-                port_spin.setEnabled(True)
+            try:
+                if btn_server.isVisible():
+                    btn_server.setText("Start Server")
+                    btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
+                    btn_server.setEnabled(True)
+                    port_spin.setEnabled(True)
+            except RuntimeError:
+                pass
             self._update_server_label()
 
         self._server.server_started.connect(set_running_ui)
@@ -598,6 +735,7 @@ class MainWindow(QMainWindow):
 
         def _start_server() -> None:
             self._server.port = port_spin.value()
+            self._save_settings()
             btn_server.setEnabled(False)
             port_spin.setEnabled(False)
             btn_server.setText("Starting...")
@@ -670,6 +808,11 @@ class MainWindow(QMainWindow):
             self._server_label.setText("Server: OFF")
             self._server_label.setStyleSheet("color: #F44336;")
 
+    def _save_settings(self) -> None:
+        self._settings["status_poll_interval"] = self._status_poll_interval
+        self._settings["server_port"] = self._server.port
+        settings.save(self._settings)
+
     def _restart_status_timer(self) -> None:
         self._status_timer.stop()
         if self._status_poll_interval > 0 and self._conn.connected:
@@ -687,3 +830,6 @@ class MainWindow(QMainWindow):
         self._lidar_panel._canvas.update()
         self._lidar_panel._frame_count = 0
         self._lidar_panel._info_label.setText("Points: -- | Frames: 0")
+        self._command_panel._lidar_health_label.setText("Health: --")
+        self._command_panel._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._command_panel._lidar_info_label.setText("Model: -- | FW: -- | HW: --")

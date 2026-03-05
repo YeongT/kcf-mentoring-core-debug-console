@@ -34,3 +34,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Runtime settings
+settings.json
+
+# Claude
+.claude/

@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QWidget,
+    QComboBox,
+    QCheckBox,
 )
 from PyQt6.QtCore import pyqtSignal
 
@@ -22,11 +24,37 @@ from protocol import (
     CMD_START_STREAM,
     CMD_STOP_STREAM,
     CMD_CAPTURE_FRAME,
+    CMD_SET_CAMERA_CONFIG,
+    CMD_GET_DEVICE_INFO,
+    CMD_REBOOT,
+    CMD_LIDAR_GET_INFO,
+    CMD_LIDAR_GET_HEALTH,
+    CMD_LIDAR_RESET,
+    CMD_LIDAR_SET_SCAN_MODE,
+    SCAN_MODE_STANDARD,
+    SCAN_MODE_EXPRESS,
+    CMD_CAMERA_GET_INFO,
+    CMD_CAMERA_SET_PARAM,
+    CAMERA_PARAM_BRIGHTNESS,
+    CAMERA_PARAM_CONTRAST,
+    CAMERA_PARAM_SATURATION,
+    CAMERA_PARAM_EFFECT,
+    CAMERA_PARAM_WHITEBAL,
+    CAMERA_PARAM_EXPOSURE,
+    CAMERA_PARAM_AEC_VALUE,
+    CAMERA_PARAM_HMIRROR,
+    CAMERA_PARAM_VFLIP,
+    CAMERA_EFFECTS,
     CMD_NAMES,
     INIT_FLAG_START_STREAM,
     SCAN_IDLE,
     SCAN_SCANNING,
     parse_status,
+    build_camera_set_param,
+    CAMERA_RESOLUTIONS,
+    CAMERA_QUALITIES,
+    DEFAULT_CAMERA_RESOLUTION,
+    DEFAULT_CAMERA_QUALITY,
 )
 from ws_server import DeviceConnection
 
@@ -58,39 +86,33 @@ class CommandPanel(QGroupBox):
         layout.setSpacing(6)
         layout.setContentsMargins(10, 14, 10, 6)
 
-        # Primary actions: Stream + Scan (full-width, prominent)
-        action_grid = QGridLayout()
-        action_grid.setSpacing(4)
+        # Button container (grid switches between 3x2 and 2x3)
+        self._btn_container = QWidget()
+        layout.addWidget(self._btn_container, 0)
 
         self._btn_stream = QPushButton("Start Stream")
         self._btn_stream.setStyleSheet(_STYLE_STREAM_OFF)
         self._btn_stream.clicked.connect(self._toggle_stream)
-        action_grid.addWidget(self._btn_stream, 0, 0)
 
         self._btn_scan = QPushButton("Start Scan")
         self._btn_scan.setStyleSheet(_STYLE_SCAN_OFF)
         self._btn_scan.clicked.connect(self._toggle_scan)
-        action_grid.addWidget(self._btn_scan, 0, 1)
 
-        btn_status = QPushButton("Get Status")
-        btn_status.clicked.connect(lambda: self._send(CMD_GET_STATUS))
-        action_grid.addWidget(btn_status, 1, 0)
+        self._btn_status = QPushButton("Get Status")
+        self._btn_status.clicked.connect(lambda: self._send(CMD_GET_STATUS))
 
-        btn_capture = QPushButton("Capture")
-        btn_capture.clicked.connect(lambda: self._send(CMD_CAPTURE_FRAME))
-        action_grid.addWidget(btn_capture, 1, 1)
+        self._btn_capture = QPushButton("Capture")
+        self._btn_capture.clicked.connect(lambda: self._send(CMD_CAPTURE_FRAME))
 
         self._btn_reconnect = QPushButton("Reconnect")
-        self._btn_reconnect.setStyleSheet("background-color: #616161; color: white;")
         self._btn_reconnect.clicked.connect(self._do_reconnect)
-        action_grid.addWidget(self._btn_reconnect, 2, 0)
 
-        btn_reset = QPushButton("Reset")
-        btn_reset.setStyleSheet("background-color: #FF9800; color: white;")
-        btn_reset.clicked.connect(self.reset_requested.emit)
-        action_grid.addWidget(btn_reset, 2, 1)
+        self._btn_reset = QPushButton("Reset")
+        self._btn_reset.setStyleSheet("background-color: #FF9800; color: white;")
+        self._btn_reset.clicked.connect(self.reset_requested.emit)
 
-        layout.addLayout(action_grid, 4)
+        self._btn_apply_camera = QPushButton("Apply")
+        self._btn_apply_camera.clicked.connect(self._send_camera_config)
 
         # --- Separator ---
         sep = QLabel()
@@ -119,6 +141,19 @@ class CommandPanel(QGroupBox):
         self._btn_rpm = QPushButton("Set")
         self._btn_rpm.clicked.connect(self._send_rpm)
 
+        # Camera config controls
+        self._lbl_resolution = QLabel("Resolution")
+        self._resolution_combo = QComboBox()
+        for name in CAMERA_RESOLUTIONS:
+            self._resolution_combo.addItem(name, CAMERA_RESOLUTIONS[name])
+        self._resolution_combo.setCurrentText(DEFAULT_CAMERA_RESOLUTION)
+
+        self._lbl_quality = QLabel("Quality")
+        self._quality_combo = QComboBox()
+        for name in CAMERA_QUALITIES:
+            self._quality_combo.addItem(name, CAMERA_QUALITIES[name])
+        self._quality_combo.setCurrentText(DEFAULT_CAMERA_QUALITY)
+
         self._params_vsep = QLabel()
         self._params_vsep.setFixedWidth(1)
         self._params_vsep.setStyleSheet("background-color: #333;")
@@ -127,13 +162,138 @@ class CommandPanel(QGroupBox):
         self._params_hsep.setFixedHeight(1)
         self._params_hsep.setStyleSheet("background-color: #333;")
 
+        self._params_hsep2 = QLabel()
+        self._params_hsep2.setFixedHeight(1)
+        self._params_hsep2.setStyleSheet("background-color: #333;")
+
+        # --- Camera Advanced Controls ---
+        self._camera_adv_container = QWidget()
+        layout.addWidget(self._camera_adv_container, 0)
+
+        self._brightness_spin = QSpinBox()
+        self._brightness_spin.setRange(-2, 2)
+        self._brightness_spin.setValue(0)
+        self._brightness_spin.valueChanged.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_BRIGHTNESS, v)
+        )
+
+        self._contrast_spin = QSpinBox()
+        self._contrast_spin.setRange(-2, 2)
+        self._contrast_spin.setValue(0)
+        self._contrast_spin.valueChanged.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_CONTRAST, v)
+        )
+
+        self._saturation_spin = QSpinBox()
+        self._saturation_spin.setRange(-2, 2)
+        self._saturation_spin.setValue(0)
+        self._saturation_spin.valueChanged.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_SATURATION, v)
+        )
+
+        self._effect_combo = QComboBox()
+        for val, name in CAMERA_EFFECTS.items():
+            self._effect_combo.addItem(name, val)
+        self._effect_combo.currentIndexChanged.connect(
+            lambda: self._send_camera_param(
+                CAMERA_PARAM_EFFECT, self._effect_combo.currentData()
+            )
+        )
+
+        self._whitebal_check = QCheckBox("White Balance")
+        self._whitebal_check.setChecked(True)
+        self._whitebal_check.toggled.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_WHITEBAL, int(v))
+        )
+
+        self._exposure_check = QCheckBox("Auto Exposure")
+        self._exposure_check.setChecked(True)
+        self._exposure_check.toggled.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_EXPOSURE, int(v))
+        )
+
+        self._aec_spin = QSpinBox()
+        self._aec_spin.setRange(0, 1200)
+        self._aec_spin.setValue(300)
+        self._aec_spin.setSingleStep(50)
+        self._aec_spin.valueChanged.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_AEC_VALUE, v)
+        )
+
+        self._hmirror_check = QCheckBox("H-Mirror")
+        self._hmirror_check.toggled.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_HMIRROR, int(v))
+        )
+
+        self._vflip_check = QCheckBox("V-Flip")
+        self._vflip_check.toggled.connect(
+            lambda v: self._send_camera_param(CAMERA_PARAM_VFLIP, int(v))
+        )
+
+        self._btn_camera_info = QPushButton("Cam Info")
+        self._btn_camera_info.clicked.connect(lambda: self._send(CMD_CAMERA_GET_INFO))
+
+        # --- LiDAR Controls ---
+        self._lidar_ctrl_container = QWidget()
+        layout.addWidget(self._lidar_ctrl_container, 0)
+
+        self._btn_lidar_info = QPushButton("Info")
+        self._btn_lidar_info.clicked.connect(lambda: self._send(CMD_LIDAR_GET_INFO))
+
+        self._btn_lidar_health = QPushButton("Health")
+        self._btn_lidar_health.clicked.connect(lambda: self._send(CMD_LIDAR_GET_HEALTH))
+
+        self._btn_lidar_reset = QPushButton("Reset")
+        self._btn_lidar_reset.clicked.connect(lambda: self._send(CMD_LIDAR_RESET))
+
+        # RPM preset buttons
+        self._rpm_presets: list[QPushButton] = []
+        for rpm_val in (330, 660, 1000, 1500):
+            btn = QPushButton(str(rpm_val))
+            btn.setToolTip(f"Set RPM to {rpm_val}")
+            btn.clicked.connect(lambda _, r=rpm_val: self._send_rpm_preset(r))
+            self._rpm_presets.append(btn)
+
+        # Inline status labels
+        self._lidar_health_label = QLabel("Health: --")
+        self._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._lidar_info_label = QLabel("Model: -- | FW: -- | HW: --")
+        self._lidar_info_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._lidar_info_label.setWordWrap(True)
+
+        # Scan mode selector
+        self._scan_mode = SCAN_MODE_STANDARD
+        self._btn_scan_standard = QPushButton("Standard")
+        self._btn_scan_standard.setCheckable(True)
+        self._btn_scan_standard.setChecked(True)
+        self._btn_scan_standard.clicked.connect(lambda: self._set_scan_mode(SCAN_MODE_STANDARD))
+
+        self._btn_scan_express = QPushButton("Express")
+        self._btn_scan_express.setCheckable(True)
+        self._btn_scan_express.clicked.connect(lambda: self._set_scan_mode(SCAN_MODE_EXPRESS))
+
+        self._scan_mode_buttons = [self._btn_scan_standard, self._btn_scan_express]
+
+        # --- Device Controls (shown in all sidebar views) ---
+        self._btn_device_info = QPushButton("Dev Info")
+        self._btn_device_info.clicked.connect(lambda: self._send(CMD_GET_DEVICE_INFO))
+
+        self._btn_reboot = QPushButton("Reboot")
+        self._btn_reboot.setStyleSheet("background-color: #D32F2F; color: white;")
+        self._btn_reboot.clicked.connect(lambda: self._send(CMD_REBOOT))
+
         self._sidebar_mode = False
+        self._current_view = "split"
+        self._apply_button_grid()
         self._apply_params_layout()
 
+        layout.addStretch(1)
         self.setLayout(layout)
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
         self._reconnecting = False
+        self._btn_reconnect.setText("Reconnect")
+        self._btn_reconnect.setStyleSheet("")
         self._set_enabled(True)
         # Apply initial status from INIT handshake
         if _initial_status:
@@ -142,15 +302,17 @@ class CommandPanel(QGroupBox):
     def _on_disconnected(self) -> None:
         self._scanning = False
         self._streaming = False
+        self._sync_init_settings()
+        # Reset button text before disabling
+        self._btn_scan.setText("Start Scan")
+        self._btn_stream.setText("Start Stream")
+        self._lidar_health_label.setText("Health: --")
+        self._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._lidar_info_label.setText("Model: -- | FW: -- | HW: --")
         self._set_enabled(False)
-        self._sync_buttons()
         if self._reconnecting:
             self._btn_reconnect.setText("Reconnecting...")
             self._btn_reconnect.setStyleSheet("background-color: #FF9800; color: white;")
-            self._btn_reconnect.setEnabled(False)
-        else:
-            self._btn_reconnect.setText("Reconnect")
-            self._btn_reconnect.setStyleSheet("background-color: #616161; color: white;")
 
     def _on_status(self, data: bytes) -> None:
         status = parse_status(data)
@@ -182,26 +344,264 @@ class CommandPanel(QGroupBox):
             child.setEnabled(enabled)
         for child in self.findChildren(QSpinBox):
             child.setEnabled(enabled)
+        for child in self.findChildren(QComboBox):
+            child.setEnabled(enabled)
+        for child in self.findChildren(QCheckBox):
+            child.setEnabled(enabled)
         if not enabled:
             self._btn_stream.setStyleSheet(_STYLE_DISABLED)
             self._btn_scan.setStyleSheet(_STYLE_DISABLED)
-            self._btn_reconnect.setStyleSheet(_STYLE_DISABLED)
 
-    def set_sidebar_mode(self, sidebar: bool) -> None:
-        if sidebar == self._sidebar_mode:
+    def set_sidebar_mode(self, sidebar: bool, view: str = "split") -> None:
+        if sidebar == self._sidebar_mode and view == self._current_view:
             return
         self._sidebar_mode = sidebar
+        self._current_view = view
+        self._apply_button_grid()
         self._apply_params_layout()
+        # Re-apply connection state after layout rebuild
+        if not self._conn.connected:
+            self._set_enabled(False)
+        else:
+            self._sync_buttons()
 
-    def _apply_params_layout(self) -> None:
-        old = self._params_container.layout()
+    def _apply_button_grid(self) -> None:
+        old = self._btn_container.layout()
         if old is not None:
-            # Detach all widgets from old layout
             while old.count():
                 old.takeAt(0)
-            QWidget().setLayout(old)  # discard old layout
+            QWidget().setLayout(old)
+
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        grid.setContentsMargins(0, 0, 0, 0)
+        buttons = [
+            self._btn_stream, self._btn_scan, self._btn_status,
+            self._btn_capture, self._btn_reconnect, self._btn_reset,
+        ]
+        if self._sidebar_mode:
+            # 2 columns x 3 rows
+            for i, btn in enumerate(buttons):
+                grid.addWidget(btn, i // 2, i % 2)
+        else:
+            # 3 columns x 2 rows
+            for i, btn in enumerate(buttons):
+                grid.addWidget(btn, i // 3, i % 3)
+        self._btn_container.setLayout(grid)
+
+    def _apply_params_layout(self) -> None:
+        # Clear existing layouts
+        for container in (self._params_container, self._camera_adv_container, self._lidar_ctrl_container):
+            old = container.layout()
+            if old is not None:
+                while old.count():
+                    old.takeAt(0)
+                QWidget().setLayout(old)
+
+        view = self._current_view
+        show_camera = view in ("split", "camera")
+        show_lidar = view in ("split", "lidar")
+
+        # Hide all param widgets first, show selectively
+        camera_widgets = [
+            self._lbl_interval, self._interval_spin,
+            self._lbl_resolution, self._resolution_combo,
+            self._lbl_quality, self._quality_combo, self._btn_apply_camera,
+        ]
+        lidar_widgets = [self._lbl_rpm, self._rpm_spin, self._btn_rpm]
+        camera_adv_widgets = [
+            self._brightness_spin, self._contrast_spin, self._saturation_spin,
+            self._effect_combo, self._whitebal_check, self._exposure_check,
+            self._aec_spin, self._hmirror_check, self._vflip_check,
+            self._btn_camera_info,
+        ]
+        lidar_ctrl_widgets = [
+            self._btn_lidar_info, self._btn_lidar_health, self._btn_lidar_reset,
+            self._lidar_health_label, self._lidar_info_label,
+            *self._rpm_presets,
+            *self._scan_mode_buttons,
+        ]
+        device_widgets = [self._btn_device_info, self._btn_reboot]
+
+        for w in camera_widgets:
+            w.setVisible(show_camera)
+        for w in lidar_widgets:
+            w.setVisible(show_lidar)
+
+        # Camera advanced and lidar controls only in sidebar mode
+        is_camera_sidebar = self._sidebar_mode and view == "camera"
+        is_lidar_sidebar = self._sidebar_mode and view == "lidar"
+        for w in camera_adv_widgets:
+            w.setVisible(is_camera_sidebar)
+        for w in lidar_ctrl_widgets:
+            w.setVisible(is_lidar_sidebar)
+        for w in device_widgets:
+            w.setVisible(self._sidebar_mode)
+
+        self._camera_adv_container.setVisible(is_camera_sidebar)
+        self._lidar_ctrl_container.setVisible(is_lidar_sidebar)
 
         if self._sidebar_mode:
+            # --- Params section ---
+            vbox = QVBoxLayout()
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(4)
+            self._params_vsep.hide()
+            self._params_hsep.hide()
+            self._params_hsep2.hide()
+
+            if show_camera:
+                row1 = QHBoxLayout()
+                row1.setSpacing(8)
+                row1.addWidget(self._lbl_interval)
+                row1.addWidget(self._interval_spin)
+                row1.addStretch()
+                vbox.addLayout(row1)
+                row3 = QHBoxLayout()
+                row3.setSpacing(8)
+                row3.addWidget(self._lbl_resolution)
+                row3.addWidget(self._resolution_combo)
+                row3.addStretch()
+                vbox.addLayout(row3)
+                row4 = QHBoxLayout()
+                row4.setSpacing(8)
+                row4.addWidget(self._lbl_quality)
+                row4.addWidget(self._quality_combo)
+                row4.addWidget(self._btn_apply_camera)
+                row4.addStretch()
+                vbox.addLayout(row4)
+
+            if show_lidar:
+                row2 = QHBoxLayout()
+                row2.setSpacing(8)
+                row2.addWidget(self._lbl_rpm)
+                row2.addWidget(self._rpm_spin)
+                row2.addWidget(self._btn_rpm)
+                row2.addStretch()
+                vbox.addLayout(row2)
+
+            self._params_container.setLayout(vbox)
+
+            # --- Camera advanced section ---
+            if is_camera_sidebar:
+                adv = QVBoxLayout()
+                adv.setContentsMargins(0, 0, 0, 0)
+                adv.setSpacing(3)
+
+                sep = QLabel()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet("background-color: #333;")
+                adv.addWidget(sep)
+
+                lbl = QLabel("Sensor Controls")
+                lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+                adv.addLayout(self._make_param_row(lbl, None))
+
+                adv.addLayout(self._make_param_row(QLabel("Brightness"), self._brightness_spin))
+                adv.addLayout(self._make_param_row(QLabel("Contrast"), self._contrast_spin))
+                adv.addLayout(self._make_param_row(QLabel("Saturation"), self._saturation_spin))
+                adv.addLayout(self._make_param_row(QLabel("Effect"), self._effect_combo))
+                adv.addLayout(self._make_param_row(QLabel("AEC Value"), self._aec_spin))
+
+                checks_row = QHBoxLayout()
+                checks_row.setSpacing(8)
+                checks_row.addWidget(self._whitebal_check)
+                checks_row.addWidget(self._exposure_check)
+                checks_row.addStretch()
+                adv.addLayout(checks_row)
+
+                checks_row2 = QHBoxLayout()
+                checks_row2.setSpacing(8)
+                checks_row2.addWidget(self._hmirror_check)
+                checks_row2.addWidget(self._vflip_check)
+                checks_row2.addStretch()
+                adv.addLayout(checks_row2)
+
+                btn_row = QHBoxLayout()
+                btn_row.setSpacing(4)
+                btn_row.addWidget(self._btn_camera_info)
+                btn_row.addWidget(self._btn_device_info)
+                btn_row.addWidget(self._btn_reboot)
+                adv.addLayout(btn_row)
+
+                self._camera_adv_container.setLayout(adv)
+
+            # --- LiDAR controls section ---
+            if is_lidar_sidebar:
+                lctrl = QVBoxLayout()
+                lctrl.setContentsMargins(0, 0, 0, 0)
+                lctrl.setSpacing(4)
+
+                sep = QLabel()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet("background-color: #333;")
+                lctrl.addWidget(sep)
+
+                lbl = QLabel("LiDAR Controls")
+                lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+                lctrl.addLayout(self._make_param_row(lbl, None))
+
+                # RPM presets
+                rpm_lbl = QLabel("RPM")
+                rpm_lbl.setStyleSheet("color: #666; font-size: 9px;")
+                lctrl.addWidget(rpm_lbl)
+                rpm_row = QHBoxLayout()
+                rpm_row.setSpacing(0)
+                for i, btn in enumerate(self._rpm_presets):
+                    extra = (self._GRP_FIRST if i == 0 else "") + (self._GRP_LAST if i == len(self._rpm_presets) - 1 else "")
+                    btn.setStyleSheet(self._GRP_BTN + f"min-width: 36px;{extra}")
+                    rpm_row.addWidget(btn)
+                rpm_row.addStretch()
+                lctrl.addLayout(rpm_row)
+
+                # Scan mode
+                mode_lbl = QLabel("Mode")
+                mode_lbl.setStyleSheet("color: #666; font-size: 9px;")
+                lctrl.addWidget(mode_lbl)
+                mode_row = QHBoxLayout()
+                mode_row.setSpacing(0)
+                for i, btn in enumerate(self._scan_mode_buttons):
+                    is_active = btn.isChecked()
+                    base = self._GRP_ON if is_active else self._GRP_BTN
+                    extra = (self._GRP_FIRST if i == 0 else "") + (self._GRP_LAST if i == len(self._scan_mode_buttons) - 1 else "")
+                    btn.setStyleSheet(base + f"min-width: 56px;{extra}")
+                    mode_row.addWidget(btn)
+                mode_row.addStretch()
+                lctrl.addLayout(mode_row)
+
+                # Query buttons
+                btn_row1 = QHBoxLayout()
+                btn_row1.setSpacing(3)
+                btn_row1.addWidget(self._btn_lidar_info)
+                btn_row1.addWidget(self._btn_lidar_health)
+                btn_row1.addWidget(self._btn_lidar_reset)
+                lctrl.addLayout(btn_row1)
+
+                # Inline status display
+                sep2 = QLabel()
+                sep2.setFixedHeight(1)
+                sep2.setStyleSheet("background-color: #333;")
+                lctrl.addWidget(sep2)
+
+                lctrl.addWidget(self._lidar_health_label)
+                lctrl.addWidget(self._lidar_info_label)
+
+                # Device buttons at bottom
+                sep3 = QLabel()
+                sep3.setFixedHeight(1)
+                sep3.setStyleSheet("background-color: #333;")
+                lctrl.addWidget(sep3)
+
+                bottom_row = QHBoxLayout()
+                bottom_row.setSpacing(3)
+                bottom_row.addWidget(self._btn_device_info)
+                bottom_row.addStretch()
+                bottom_row.addWidget(self._btn_reboot)
+                lctrl.addLayout(bottom_row)
+
+                self._lidar_ctrl_container.setLayout(lctrl)
+        else:
+            # Split mode: all params in horizontal rows
             vbox = QVBoxLayout()
             vbox.setContentsMargins(0, 0, 0, 0)
             vbox.setSpacing(4)
@@ -209,32 +609,33 @@ class CommandPanel(QGroupBox):
             row1.setSpacing(8)
             row1.addWidget(self._lbl_interval)
             row1.addWidget(self._interval_spin)
-            row1.addStretch()
-            vbox.addLayout(row1)
-            self._params_hsep.show()
-            self._params_vsep.hide()
-            vbox.addWidget(self._params_hsep)
-            row2 = QHBoxLayout()
-            row2.setSpacing(8)
-            row2.addWidget(self._lbl_rpm)
-            row2.addWidget(self._rpm_spin)
-            row2.addWidget(self._btn_rpm)
-            row2.addStretch()
-            vbox.addLayout(row2)
-            self._params_container.setLayout(vbox)
-        else:
-            hbox = QHBoxLayout()
-            hbox.setContentsMargins(0, 0, 0, 0)
-            hbox.setSpacing(8)
-            hbox.addWidget(self._lbl_interval)
-            hbox.addWidget(self._interval_spin)
             self._params_vsep.show()
             self._params_hsep.hide()
-            hbox.addWidget(self._params_vsep)
-            hbox.addWidget(self._lbl_rpm)
-            hbox.addWidget(self._rpm_spin)
-            hbox.addWidget(self._btn_rpm)
-            self._params_container.setLayout(hbox)
+            self._params_hsep2.hide()
+            row1.addWidget(self._params_vsep)
+            row1.addWidget(self._lbl_rpm)
+            row1.addWidget(self._rpm_spin)
+            row1.addWidget(self._btn_rpm)
+            vbox.addLayout(row1)
+            row2 = QHBoxLayout()
+            row2.setSpacing(8)
+            row2.addWidget(self._lbl_resolution)
+            row2.addWidget(self._resolution_combo)
+            row2.addWidget(self._lbl_quality)
+            row2.addWidget(self._quality_combo)
+            row2.addWidget(self._btn_apply_camera)
+            vbox.addLayout(row2)
+            self._params_container.setLayout(vbox)
+
+    @staticmethod
+    def _make_param_row(label: QLabel, widget) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(label)
+        if widget is not None:
+            row.addWidget(widget)
+        row.addStretch()
+        return row
 
     def _on_interval_changed(self, value: int) -> None:
         if self._streaming:
@@ -247,6 +648,8 @@ class CommandPanel(QGroupBox):
         s = self._conn.init_ack_settings
         s.stream_interval_ms = self._interval_spin.value()
         s.motor_rpm = self._rpm_spin.value()
+        s.camera_resolution = self._resolution_combo.currentData()
+        s.camera_quality = self._quality_combo.currentData()
         if self._streaming:
             s.flags |= INIT_FLAG_START_STREAM
         else:
@@ -274,7 +677,6 @@ class CommandPanel(QGroupBox):
         self._reconnecting = True
         self._btn_reconnect.setText("Reconnecting...")
         self._btn_reconnect.setEnabled(False)
-        self._btn_reconnect.setStyleSheet("background-color: #FF9800; color: white;")
         self._conn.disconnect()
 
     def _send(self, cmd_id: int) -> None:
@@ -282,8 +684,66 @@ class CommandPanel(QGroupBox):
         self._conn.log_message.emit(f"User command: {name}")
         self._conn.send_command(cmd_id)
 
+    def _send_camera_config(self) -> None:
+        res_val = self._resolution_combo.currentData()
+        qual_val = self._quality_combo.currentData()
+        res_name = self._resolution_combo.currentText()
+        qual_name = self._quality_combo.currentText()
+        self._conn.log_message.emit(
+            f"User command: SET_CAMERA_CONFIG resolution={res_name}, quality={qual_name}"
+        )
+        self._conn.send_command(
+            CMD_SET_CAMERA_CONFIG, struct.pack("BB", res_val, qual_val)
+        )
+        self._sync_init_settings()
+
     def _send_rpm(self) -> None:
         rpm = self._rpm_spin.value()
         self._conn.log_message.emit(f"User command: SET_MOTOR_RPM rpm={rpm}")
         self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", rpm))
         self._sync_init_settings()
+
+    def _send_rpm_preset(self, rpm: int) -> None:
+        self._rpm_spin.setValue(rpm)
+        self._send_rpm()
+
+    _GRP_BTN = "padding: 3px 0; font-size: 10px; border-radius: 0; border: 1px solid #444;"
+    _GRP_ON = _GRP_BTN + "background-color: #1565C0; color: white; border-color: #1976D2;"
+    _GRP_FIRST = " border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
+    _GRP_LAST = " border-top-right-radius: 4px; border-bottom-right-radius: 4px;"
+
+    def _set_scan_mode(self, mode: int) -> None:
+        self._scan_mode = mode
+        self._btn_scan_standard.setChecked(mode == SCAN_MODE_STANDARD)
+        self._btn_scan_express.setChecked(mode == SCAN_MODE_EXPRESS)
+        for i, btn in enumerate(self._scan_mode_buttons):
+            is_active = btn.isChecked()
+            base = self._GRP_ON if is_active else self._GRP_BTN
+            extra = (self._GRP_FIRST if i == 0 else "") + (self._GRP_LAST if i == len(self._scan_mode_buttons) - 1 else "")
+            btn.setStyleSheet(base + f"min-width: 56px;{extra}")
+        # Send command to device
+        if self._conn.connected:
+            from protocol import SCAN_MODE_NAMES
+            name = SCAN_MODE_NAMES.get(mode, str(mode))
+            self._conn.log_message.emit(f"User command: LIDAR_SET_SCAN_MODE mode={name}")
+            self._conn.send_command(CMD_LIDAR_SET_SCAN_MODE, struct.pack("B", mode))
+
+    def update_lidar_info(self, info) -> None:
+        self._lidar_info_label.setText(
+            f"Model: {info.major_model} | FW: {info.firmware_str} | HW: {info.hardware}\n"
+            f"Serial: {info.serial}"
+        )
+
+    def update_lidar_health(self, health) -> None:
+        color_map = {"Good": "#4CAF50", "Warning": "#FF9800"}
+        color = color_map.get(health.status_name, "#F44336")
+        self._lidar_health_label.setText(f"Health: {health.status_name}")
+        self._lidar_health_label.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: bold;")
+
+    def _send_camera_param(self, param_id: int, value: int) -> None:
+        if not self._conn.connected:
+            return
+        from protocol import CAMERA_PARAM_NAMES
+        name = CAMERA_PARAM_NAMES.get(param_id, f"0x{param_id:02X}")
+        self._conn.log_message.emit(f"User command: CAMERA_SET_PARAM {name}={value}")
+        self._conn.send_command(CMD_CAMERA_SET_PARAM, struct.pack("<Bh", param_id, value))
