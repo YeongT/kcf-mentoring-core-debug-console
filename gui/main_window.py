@@ -396,6 +396,8 @@ class MainWindow(QMainWindow):
     def _on_raw_data(self, _direction: str, data: bytes) -> None:
         self._total_bytes += len(data)
         self._status_panel.update_data_total(self._total_bytes)
+        if _direction == "RX":
+            self._status_panel.update_last_rx()
 
     def _tick_uptime(self) -> None:
         if self._connected_at > 0:
@@ -742,7 +744,10 @@ class MainWindow(QMainWindow):
             self._server.start()
 
         def _stop_server() -> None:
+            self._status_timer.stop()
+            self._uptime_timer.stop()
             self._server.stop()
+            self._status_panel.set_disconnected()
             set_stopped_ui()
 
         def on_server_click() -> None:

@@ -69,14 +69,20 @@ class DeviceConnection(QObject):
         seq = self.next_seq()
         packet = build_command(cmd_id, seq, payload)
         self.raw_message_received.emit("TX", packet)
-        asyncio.run_coroutine_threadsafe(self._send(packet), self._loop)
+        try:
+            asyncio.run_coroutine_threadsafe(self._send(packet), self._loop)
+        except RuntimeError:
+            pass  # event loop closed
 
     def send_raw(self, data: bytes) -> None:
         """Send raw bytes to the device (thread-safe)."""
         if not self._ws or not self._loop:
             return
         self.raw_message_received.emit("TX", data)
-        asyncio.run_coroutine_threadsafe(self._send(data), self._loop)
+        try:
+            asyncio.run_coroutine_threadsafe(self._send(data), self._loop)
+        except RuntimeError:
+            pass  # event loop closed
 
     async def _send(self, data: bytes) -> None:
         if self._ws:
@@ -88,7 +94,10 @@ class DeviceConnection(QObject):
     def disconnect(self) -> None:
         """Close the WebSocket connection from the server side."""
         if self._ws and self._loop:
-            asyncio.run_coroutine_threadsafe(self._close(), self._loop)
+            try:
+                asyncio.run_coroutine_threadsafe(self._close(), self._loop)
+            except RuntimeError:
+                pass  # event loop closed
 
     async def _close(self) -> None:
         if self._ws:
@@ -147,15 +156,22 @@ class WebSocketServer(QObject):
         if not self._running:
             return
         self._running = False
+        self._connection._clear_connection()
         if self._loop:
             if self._server:
                 self._loop.call_soon_threadsafe(self._server.close)
+            # Cancel pending tasks before stopping
+            self._loop.call_soon_threadsafe(self._cancel_tasks)
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=3)
         self._thread = None
         self._loop = None
         self._server = None
+
+    def _cancel_tasks(self) -> None:
+        for task in asyncio.all_tasks(self._loop):
+            task.cancel()
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()

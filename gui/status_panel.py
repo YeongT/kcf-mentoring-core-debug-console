@@ -1,5 +1,7 @@
 """Status panel displaying connection info and DeviceStatus fields."""
 
+from datetime import datetime
+
 from PyQt6.QtWidgets import QGroupBox, QVBoxLayout, QGridLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -28,6 +30,7 @@ class StatusPanel(QGroupBox):
             ("Device", "device"),
             ("Uptime", "uptime"),
             ("Data", "data_total"),
+            ("Last RX", "last_rx"),
         ]
         for row, (label_text, key) in enumerate(conn_fields):
             name_label = QLabel(label_text)
@@ -118,6 +121,9 @@ class StatusPanel(QGroupBox):
         m, s = divmod(rem, 60)
         self._labels["uptime"].setText(f"{h:02d}:{m:02d}:{s:02d}")
 
+    def update_last_rx(self) -> None:
+        self._labels["last_rx"].setText(datetime.now().strftime("%H:%M:%S.%f")[:-3])
+
     def update_data_total(self, total_bytes: int) -> None:
         if total_bytes < 1024:
             self._labels["data_total"].setText(f"{total_bytes} B")
@@ -151,6 +157,6 @@ class StatusPanel(QGroupBox):
 
     def reset(self) -> None:
         for key, label in self._labels.items():
-            if key not in ("connection",):
+            if key not in ("connection", "device"):
                 label.setText("--")
                 label.setStyleSheet("")
