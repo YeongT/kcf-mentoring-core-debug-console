@@ -664,7 +664,7 @@ class MainWindow(QMainWindow):
 
     def _update_server_label(self) -> None:
         if self._server.running:
-            self._server_label.setText(f"Server: :{self._server.port}")
+            self._server_label.setText(f"Server: ON (port {self._server.port})")
             self._server_label.setStyleSheet("color: #4CAF50;")
         else:
             self._server_label.setText("Server: OFF")

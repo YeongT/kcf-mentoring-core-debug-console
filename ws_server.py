@@ -125,6 +125,10 @@ class WebSocketServer(QObject):
         return self._running
 
     @property
+    def host(self) -> str:
+        return self._host
+
+    @property
     def port(self) -> int:
         return self._port
 
