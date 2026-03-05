@@ -26,6 +26,8 @@ from protocol import (
     parse_lidar_frame,
     parse_response,
     DeviceStatus,
+    InitAckSettings,
+    INIT_FLAG_START_STREAM,
     CMD_GET_STATUS,
 )
 from ws_server import DeviceConnection, WebSocketServer
@@ -290,12 +292,15 @@ class MainWindow(QMainWindow):
     #  Connection events
     # ================================================================
 
-    def _on_connected(self, device_name: str) -> None:
+    def _on_connected(self, device_name: str, initial_status: bytes) -> None:
         self._status_panel.set_connected(device_name)
         self._connected_at = time.monotonic()
         self._total_bytes = 0
         self._uptime_timer.start()
         self._restart_status_timer()
+        # Apply initial status from INIT handshake if available
+        if initial_status:
+            self._on_status(initial_status)
 
     def _on_disconnected(self) -> None:
         self._status_panel.set_disconnected()
@@ -464,7 +469,25 @@ class MainWindow(QMainWindow):
     # ================================================================
 
     def _show_settings_dialog(self) -> None:
-        dlg = QDialog(self)
+        class _SettingsDialog(QDialog):
+            """QDialog subclass that blocks Enter from closing."""
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.enter_actions: dict = {}
+
+            def keyPressEvent(self, event):
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    focused = self.focusWidget()
+                    # QSpinBox focus is on its internal QLineEdit
+                    for widget, action in self.enter_actions.items():
+                        if focused is widget or (hasattr(widget, 'lineEdit') and focused is widget.lineEdit()):
+                            action()
+                            break
+                    event.accept()
+                    return
+                super().keyPressEvent(event)
+
+        dlg = _SettingsDialog(self)
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.FramelessWindowHint)
         dlg.setStyleSheet(self._POPUP_STYLE)
         dlg.setFixedWidth(300)
@@ -481,6 +504,7 @@ class MainWindow(QMainWindow):
         title_bar.addStretch()
         btn_close = QPushButton("\u2715")
         btn_close.setStyleSheet("padding: 2px 8px; font-size: 13px; color: #888; border: none;")
+        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_close.clicked.connect(dlg.accept)
         title_bar.addWidget(btn_close)
         outer.addLayout(title_bar)
@@ -500,15 +524,33 @@ class MainWindow(QMainWindow):
         poll_spin.setToolTip("0 = disabled (device push only)")
         poll_spin.setSpecialValueText("OFF")
         poll_row.addWidget(poll_spin)
-        btn_apply = QPushButton("Apply")
-        btn_apply.setStyleSheet("background-color: #2196F3; color: white;")
 
-        def on_apply() -> None:
-            self._status_poll_interval = poll_spin.value() * 1000
+        btn_apply_poll = QPushButton("Apply")
+        btn_apply_poll.setStyleSheet("padding: 2px 10px; font-size: 11px;")
+        poll_row.addWidget(btn_apply_poll)
+
+        poll_status = QLabel()
+        poll_status.setFont(QFont("Consolas", 8))
+        poll_status.setFixedHeight(14)
+        poll_row.addWidget(poll_status)
+
+        def on_apply_poll() -> None:
+            new_val = poll_spin.value() * 1000
+            if new_val == self._status_poll_interval:
+                return
+            self._status_poll_interval = new_val
             self._restart_status_timer()
+            if new_val > 0:
+                msg = f"Poll interval → {poll_spin.value()}s"
+            else:
+                msg = "Poll disabled (device push only)"
+            poll_status.setText(msg)
+            poll_status.setStyleSheet("color: #4CAF50;")
+            self._conn.log_message.emit(f"Settings: {msg}")
+            QTimer.singleShot(2000, lambda: poll_status.setText(""))
 
-        btn_apply.clicked.connect(on_apply)
-        poll_row.addWidget(btn_apply)
+        btn_apply_poll.clicked.connect(on_apply_poll)
+        dlg.enter_actions[poll_spin] = on_apply_poll
         form.addLayout(poll_row)
 
         # --- Separator ---
@@ -534,24 +576,66 @@ class MainWindow(QMainWindow):
             btn_server.setText("Start Server")
             btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
 
-        def on_server_click() -> None:
-            if self._server.running:
-                self._server.stop()
-                btn_server.setText("Start Server")
-                btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
-            else:
-                self._server.port = port_spin.value()
-                self._server.start()
+        def set_running_ui() -> None:
+            if btn_server.isVisible():
                 btn_server.setText("Stop Server")
                 btn_server.setStyleSheet("background-color: #F44336; color: white;")
+                btn_server.setEnabled(True)
+                port_spin.setEnabled(True)
+            self._update_server_label()
+            self._conn.log_message.emit(f"Server started on port {self._server.port}")
+
+        def set_stopped_ui(error: str = "") -> None:
+            if btn_server.isVisible():
+                btn_server.setText("Start Server")
+                btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
+                btn_server.setEnabled(True)
+                port_spin.setEnabled(True)
             self._update_server_label()
 
+        self._server.server_started.connect(set_running_ui)
+        self._server.server_failed.connect(set_stopped_ui)
+
+        def _start_server() -> None:
+            self._server.port = port_spin.value()
+            btn_server.setEnabled(False)
+            port_spin.setEnabled(False)
+            btn_server.setText("Starting...")
+            self._server.start()
+
+        def _stop_server() -> None:
+            self._server.stop()
+            set_stopped_ui()
+
+        def on_server_click() -> None:
+            if self._server.running:
+                _stop_server()
+            else:
+                _start_server()
+
+        def on_port_changed() -> None:
+            new_port = port_spin.value()
+            if new_port == self._server.port and self._server.running:
+                return
+            if self._server.running:
+                self._server.stop()
+            # Brief delay to let the old socket release
+            QTimer.singleShot(100, _start_server)
+
         btn_server.clicked.connect(on_server_click)
+        dlg.enter_actions[port_spin] = on_port_changed
         server_row.addWidget(btn_server)
         form.addLayout(server_row)
 
         outer.addLayout(form)
         dlg.setLayout(outer)
+
+        def on_dialog_finished() -> None:
+            self._server.server_started.disconnect(set_running_ui)
+            self._server.server_failed.disconnect(set_stopped_ui)
+
+        dlg.finished.connect(on_dialog_finished)
+        port_spin.setFocus()
         dlg.exec()
 
     # ================================================================

@@ -17,16 +17,19 @@ class CameraPanel(QGroupBox):
         self._flip_h = False
         self._flip_v = False
         self._rotation = 0
+        self._last_pixmap: QPixmap | None = None
         self._init_ui()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
         layout.setSpacing(4)
+        layout.setContentsMargins(4, 8, 4, 4)
 
         self._image_label = QLabel("No camera feed")
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setMinimumSize(320, 240)
         self._image_label.setStyleSheet("background-color: #1a1a1a; color: #666; border: 1px solid #333;")
+        self._image_label.setScaledContents(False)
         layout.addWidget(self._image_label, 1)
 
         # Bottom bar: transform controls (left) + stats (right)
@@ -57,6 +60,12 @@ class CameraPanel(QGroupBox):
         bar.addWidget(self._btn_rotate)
 
         bar.addStretch()
+
+        self._btn_clear = QPushButton("\u2718")
+        self._btn_clear.setStyleSheet("padding: 2px 8px; font-size: 11px; color: #888;")
+        self._btn_clear.setToolTip("Clear frame")
+        self._btn_clear.clicked.connect(self.reset)
+        bar.addWidget(self._btn_clear)
 
         self._info_label = QLabel("FPS: -- | Size: -- | Frames: 0")
         self._info_label.setFont(QFont("Consolas", 8))
@@ -97,13 +106,8 @@ class CameraPanel(QGroupBox):
         if self._flip_h or self._flip_v or self._rotation:
             image = image.transformed(transform)
 
-        pixmap = QPixmap.fromImage(image)
-        scaled = pixmap.scaled(
-            self._image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._image_label.setPixmap(scaled)
+        self._last_pixmap = QPixmap.fromImage(image)
+        self._apply_pixmap()
 
         self._frame_count += 1
         self._fps_frames += 1
@@ -120,11 +124,25 @@ class CameraPanel(QGroupBox):
             f"FPS: {self._fps:.1f} | Size: {size_kb:.1f} KB | Frames: {self._frame_count}"
         )
 
+    def _apply_pixmap(self) -> None:
+        if self._last_pixmap:
+            scaled = self._last_pixmap.scaled(
+                self._image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._image_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_pixmap()
+
     def reset(self) -> None:
         self._frame_count = 0
         self._fps_frames = 0
         self._fps = 0.0
         self._last_fps_time = time.monotonic()
+        self._last_pixmap = None
         self._image_label.clear()
         self._image_label.setText("No camera feed")
         self._info_label.setText("FPS: -- | Size: -- | Frames: 0")

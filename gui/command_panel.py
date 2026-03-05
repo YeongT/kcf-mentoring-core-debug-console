@@ -22,6 +22,8 @@ from protocol import (
     CMD_START_STREAM,
     CMD_STOP_STREAM,
     CMD_CAPTURE_FRAME,
+    CMD_NAMES,
+    INIT_FLAG_START_STREAM,
     SCAN_IDLE,
     SCAN_SCANNING,
     parse_status,
@@ -44,9 +46,10 @@ class CommandPanel(QGroupBox):
         self._conn = connection
         self._scanning = False
         self._streaming = False
+        self._reconnecting = False
         self._init_ui()
         self._set_enabled(False)
-        connection.device_connected.connect(lambda _: self._set_enabled(True))
+        connection.device_connected.connect(self._on_connected)
         connection.device_disconnected.connect(self._on_disconnected)
         connection.status_received.connect(self._on_status)
 
@@ -129,13 +132,25 @@ class CommandPanel(QGroupBox):
 
         self.setLayout(layout)
 
+    def _on_connected(self, _name: str, _initial_status: bytes) -> None:
+        self._reconnecting = False
+        self._set_enabled(True)
+        # Apply initial status from INIT handshake
+        if _initial_status:
+            self._on_status(_initial_status)
+
     def _on_disconnected(self) -> None:
         self._scanning = False
         self._streaming = False
         self._set_enabled(False)
         self._sync_buttons()
-        self._btn_reconnect.setText("Reconnect")
-        self._btn_reconnect.setStyleSheet("background-color: #616161; color: white;")
+        if self._reconnecting:
+            self._btn_reconnect.setText("Reconnecting...")
+            self._btn_reconnect.setStyleSheet("background-color: #FF9800; color: white;")
+            self._btn_reconnect.setEnabled(False)
+        else:
+            self._btn_reconnect.setText("Reconnect")
+            self._btn_reconnect.setStyleSheet("background-color: #616161; color: white;")
 
     def _on_status(self, data: bytes) -> None:
         status = parse_status(data)
@@ -223,7 +238,20 @@ class CommandPanel(QGroupBox):
 
     def _on_interval_changed(self, value: int) -> None:
         if self._streaming:
+            self._conn.log_message.emit(f"User command: START_STREAM interval={value}ms")
             self._conn.send_command(CMD_START_STREAM, struct.pack("<H", value))
+        self._sync_init_settings()
+
+    def _sync_init_settings(self) -> None:
+        """Update INIT_ACK settings so next reconnect uses current values."""
+        s = self._conn.init_ack_settings
+        s.stream_interval_ms = self._interval_spin.value()
+        s.motor_rpm = self._rpm_spin.value()
+        if self._streaming:
+            s.flags |= INIT_FLAG_START_STREAM
+        else:
+            s.flags &= ~INIT_FLAG_START_STREAM
+        self._conn.init_ack_settings = s
 
     def _toggle_scan(self) -> None:
         self._btn_scan.setEnabled(False)
@@ -238,17 +266,24 @@ class CommandPanel(QGroupBox):
             self._send(CMD_STOP_STREAM)
         else:
             interval = self._interval_spin.value()
+            self._conn.log_message.emit(f"User command: START_STREAM interval={interval}ms")
             self._conn.send_command(CMD_START_STREAM, struct.pack("<H", interval))
+        self._sync_init_settings()
 
     def _do_reconnect(self) -> None:
+        self._reconnecting = True
         self._btn_reconnect.setText("Reconnecting...")
         self._btn_reconnect.setEnabled(False)
-        self._btn_reconnect.setStyleSheet(_STYLE_DISABLED)
+        self._btn_reconnect.setStyleSheet("background-color: #FF9800; color: white;")
         self._conn.disconnect()
 
     def _send(self, cmd_id: int) -> None:
+        name = CMD_NAMES.get(cmd_id, f"0x{cmd_id:02X}")
+        self._conn.log_message.emit(f"User command: {name}")
         self._conn.send_command(cmd_id)
 
     def _send_rpm(self) -> None:
         rpm = self._rpm_spin.value()
+        self._conn.log_message.emit(f"User command: SET_MOTOR_RPM rpm={rpm}")
         self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", rpm))
+        self._sync_init_settings()

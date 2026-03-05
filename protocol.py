@@ -4,14 +4,21 @@ import struct
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-# --- Message Prefixes ---
-PREFIX_CMD = 0x43  # Server → Device: command request
-PREFIX_RES = 0x52  # Device → Server: command response
-PREFIX_STATUS = 0x53  # Device → Server: periodic status push
-PREFIX_CAMERA = 0xFF  # Device → Server: JPEG camera frame
-PREFIX_LIDAR = 0x4C  # Device → Server: LiDAR preview
+# --- Message Prefixes (grouped by function) ---
+# 0x00~0x0F: Handshake
+PREFIX_INIT = 0x01  # Device → Server: init handshake
+PREFIX_INIT_ACK = 0x02  # Server → Device: init ack + settings
+# 0x10~0x1F: Command / Response
+PREFIX_CMD = 0x10  # Server → Device: command request
+PREFIX_RES = 0x11  # Device → Server: command response
+# 0x20~0x2F: Push (Device → Server)
+PREFIX_STATUS = 0x20  # Device → Server: periodic status push
+PREFIX_CAMERA = 0x21  # Device → Server: JPEG camera frame
+PREFIX_LIDAR = 0x22  # Device → Server: LiDAR preview
 
 PREFIX_NAMES = {
+    PREFIX_INIT: "INIT",
+    PREFIX_INIT_ACK: "INIT_ACK",
     PREFIX_CMD: "CMD",
     PREFIX_RES: "RES",
     PREFIX_STATUS: "STATUS",
@@ -146,7 +153,7 @@ class CommandResponse:
 
 
 def build_command(cmd_id: int, seq: int, payload: bytes = b"") -> bytes:
-    """Build a command packet: [0x43] [cmd_id] [seq] [payload...]"""
+    """Build a command packet: [0x10] [cmd_id] [seq] [payload...]"""
     return bytes([PREFIX_CMD, cmd_id, seq]) + payload
 
 
@@ -162,7 +169,7 @@ def build_start_stream(seq: int, interval_ms: int = 0) -> bytes:
 
 
 def parse_response(data: bytes) -> Optional[CommandResponse]:
-    """Parse a RES message: [0x52] [cmd_id] [seq] [result] [payload...]"""
+    """Parse a RES message: [0x11] [cmd_id] [seq] [result] [payload...]"""
     if len(data) < 4 or data[0] != PREFIX_RES:
         return None
     return CommandResponse(
@@ -174,21 +181,21 @@ def parse_response(data: bytes) -> Optional[CommandResponse]:
 
 
 def parse_status(data: bytes) -> Optional[DeviceStatus]:
-    """Parse a STATUS message: [0x53] [DeviceStatus: 17B]"""
+    """Parse a STATUS message: [0x20] [DeviceStatus: 17B]"""
     if len(data) < 18 or data[0] != PREFIX_STATUS:
         return None
     return DeviceStatus.from_bytes(data[1:18])
 
 
 def parse_camera_frame(data: bytes) -> Optional[bytes]:
-    """Parse a CAMERA message: [0xFF] [JPEG data...]"""
+    """Parse a CAMERA message: [0x21] [JPEG data...]"""
     if len(data) < 2 or data[0] != PREFIX_CAMERA:
         return None
     return data[1:]
 
 
 def parse_lidar_frame(data: bytes) -> Optional[LidarFrame]:
-    """Parse a LIDAR message: [0x4C] [ts:8B] [count:2B] [points: count*4B]"""
+    """Parse a LIDAR message: [0x22] [ts:8B] [count:2B] [points: count*4B]"""
     if len(data) < 11 or data[0] != PREFIX_LIDAR:
         return None
     timestamp_us = struct.unpack_from("<Q", data, 1)[0]
@@ -202,6 +209,57 @@ def parse_lidar_frame(data: bytes) -> Optional[LidarFrame]:
         points.append(LidarPoint(angle_deg=angle_q6 / 64.0, distance_mm=distance_mm))
         offset += 4
     return LidarFrame(timestamp_us=timestamp_us, points=points)
+
+
+# --- Handshake ---
+
+INIT_FLAG_START_STREAM = 0x01
+
+PROTOCOL_VERSION = 1
+
+
+@dataclass
+class InitMessage:
+    """INIT handshake from device."""
+
+    protocol_version: int
+    device_name: str
+    status: DeviceStatus
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Optional["InitMessage"]:
+        if len(data) < 3 or data[0] != PREFIX_INIT:
+            return None
+        version = data[1]
+        name_len = data[2]
+        if len(data) < 3 + name_len + DeviceStatus.STRUCT_SIZE:
+            return None
+        name = data[3 : 3 + name_len].decode("utf-8", errors="replace")
+        status = DeviceStatus.from_bytes(data[3 + name_len : 3 + name_len + DeviceStatus.STRUCT_SIZE])
+        return cls(protocol_version=version, device_name=name, status=status)
+
+
+@dataclass
+class InitAckSettings:
+    """Settings sent to device via INIT_ACK."""
+
+    status_push_ms: int = 2000
+    stream_interval_ms: int = 50
+    motor_rpm: int = 0
+    flags: int = 0
+
+    def to_bytes(self) -> bytes:
+        return bytes([PREFIX_INIT_ACK]) + struct.pack(
+            "<HHHBx",
+            self.status_push_ms,
+            self.stream_interval_ms,
+            self.motor_rpm,
+            self.flags,
+        )
+
+
+def parse_init(data: bytes) -> Optional[InitMessage]:
+    return InitMessage.from_bytes(data)
 
 
 def format_hex(data: bytes, max_bytes: int = 32) -> str:
