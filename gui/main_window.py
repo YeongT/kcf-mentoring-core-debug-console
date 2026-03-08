@@ -28,19 +28,9 @@ from protocol import (
     parse_lidar_frame,
     parse_response,
     DeviceStatus,
-    DeviceInfo,
-    LidarInfo,
-    LidarHealth,
-    CameraInfo,
-    InitAckSettings,
-    INIT_FLAG_START_STREAM,
     CMD_GET_STATUS,
-    CMD_GET_DEVICE_INFO,
-    CMD_LIDAR_GET_INFO,
-    CMD_LIDAR_GET_HEALTH,
-    CMD_LIDAR_SET_SCAN_MODE,
-    CMD_CAMERA_GET_INFO,
-    SCAN_MODE_NAMES,
+    CMD_SET_CAMERA_CONFIG,
+    CMD_CAMERA_SET_PARAM,
 )
 from ws_server import DeviceConnection, WebSocketServer
 import settings
@@ -213,7 +203,7 @@ class MainWindow(QMainWindow):
         self._bottom_layout.setContentsMargins(0, 4, 0, 0)
         self._bottom_layout.setSpacing(8)
         self._bottom_widget.setLayout(self._bottom_layout)
-        self._bottom_widget.setMaximumHeight(180)
+        self._bottom_widget.setMaximumHeight(220)
         main_layout.addWidget(self._bottom_widget)
 
         # ============================================================
@@ -392,6 +382,7 @@ class MainWindow(QMainWindow):
         self._status_panel.set_disconnected()
         self._uptime_timer.stop()
         self._status_timer.stop()
+        self._lidar_panel.reset()
 
     def _on_raw_data(self, _direction: str, data: bytes) -> None:
         self._total_bytes += len(data)
@@ -427,46 +418,13 @@ class MainWindow(QMainWindow):
         resp = parse_response(data)
         if not resp:
             return
+        # Status response updates the status panel
         if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= 17:
             status = DeviceStatus.from_bytes(resp.payload)
             self._status_panel.update_status(status)
-        elif resp.cmd_id == CMD_GET_DEVICE_INFO and resp.ok:
-            info = DeviceInfo.from_bytes(resp.payload)
-            if info:
-                self._conn.log_message.emit(
-                    f"DeviceInfo: {info.device_name} | chip={info.chip_model} "
-                    f"cores={info.chip_cores} rev={info.chip_revision} | "
-                    f"heap={info.free_heap // 1024}K/{info.min_free_heap // 1024}K | "
-                    f"PSRAM={info.psram_total // (1024*1024)}M free={info.psram_free // (1024*1024)}M | "
-                    f"RSSI={info.wifi_rssi}dBm"
-                )
-        elif resp.cmd_id == CMD_LIDAR_GET_INFO and resp.ok:
-            info = LidarInfo.from_bytes(resp.payload)
-            if info:
-                self._command_panel.update_lidar_info(info)
-                self._conn.log_message.emit(
-                    f"LidarInfo: model={info.major_model} FW={info.firmware_str} "
-                    f"HW={info.hardware} Serial={info.serial}"
-                )
-        elif resp.cmd_id == CMD_LIDAR_GET_HEALTH and resp.ok:
-            health = LidarHealth.from_bytes(resp.payload)
-            if health:
-                self._command_panel.update_lidar_health(health)
-                self._conn.log_message.emit(
-                    f"LidarHealth: {health.status_name} (error_code={health.error_code})"
-                )
-        elif resp.cmd_id == CMD_LIDAR_SET_SCAN_MODE and resp.ok:
-            if len(resp.payload) >= 1:
-                mode = resp.payload[0]
-                name = SCAN_MODE_NAMES.get(mode, f"Unknown({mode})")
-                self._conn.log_message.emit(f"Scan mode set to: {name}")
-        elif resp.cmd_id == CMD_CAMERA_GET_INFO and resp.ok:
-            info = CameraInfo.from_bytes(resp.payload)
-            if info:
-                self._conn.log_message.emit(
-                    f"CameraInfo: {info.model} | res={info.resolution} "
-                    f"quality={info.quality} streaming={'ON' if info.streaming else 'OFF'}"
-                )
+        # Clear camera preview on config/param change
+        elif resp.cmd_id in (CMD_SET_CAMERA_CONFIG, CMD_CAMERA_SET_PARAM) and resp.ok:
+            self._camera_panel.reset()
 
     # ================================================================
     #  View mode switching
@@ -831,10 +789,5 @@ class MainWindow(QMainWindow):
         self._log_panel._clear()
         self._camera_panel.reset()
         self._status_panel.reset()
-        self._lidar_panel._canvas._points = []
-        self._lidar_panel._canvas.update()
-        self._lidar_panel._frame_count = 0
-        self._lidar_panel._info_label.setText("Points: -- | Frames: 0")
-        self._command_panel._lidar_health_label.setText("Health: --")
-        self._command_panel._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
-        self._command_panel._lidar_info_label.setText("Model: -- | FW: -- | HW: --")
+        self._lidar_panel.reset()
+        self._command_panel.reset_lidar_state()

@@ -118,17 +118,17 @@ CMD_NAMES = {
 # --- Camera Resolution/Quality enums (matches firmware CameraController) ---
 # Resolution values are ESP-IDF framesize_t enum values
 CAMERA_RESOLUTIONS = {
-    "VGA (640x480)": 8,      # FRAMESIZE_VGA
-    "SVGA (800x600)": 9,     # FRAMESIZE_SVGA
-    "XGA (1024x768)": 10,    # FRAMESIZE_XGA
-    "SXGA (1280x1024)": 12,  # FRAMESIZE_SXGA
-    "HD (1280x720)": 11,     # FRAMESIZE_HD
-    "UXGA (1600x1200)": 13,  # FRAMESIZE_UXGA
-    "FHD (1920x1080)": 14,   # FRAMESIZE_FHD
-    "QXGA (2048x1536)": 17,  # FRAMESIZE_QXGA
-    "QHD (2560x1440)": 18,   # FRAMESIZE_QHD
-    "WQXGA (2560x1600)": 19, # FRAMESIZE_WQXGA
-    "QSXGA (2592x1944)": 20, # FRAMESIZE_QSXGA
+    "VGA (640x480)": 10,      # FRAMESIZE_VGA
+    "SVGA (800x600)": 11,     # FRAMESIZE_SVGA
+    "XGA (1024x768)": 12,     # FRAMESIZE_XGA
+    "HD (1280x720)": 13,      # FRAMESIZE_HD
+    "SXGA (1280x1024)": 14,   # FRAMESIZE_SXGA
+    "UXGA (1600x1200)": 15,   # FRAMESIZE_UXGA
+    "FHD (1920x1080)": 16,    # FRAMESIZE_FHD
+    "QXGA (2048x1536)": 19,   # FRAMESIZE_QXGA
+    "QHD (2560x1440)": 20,    # FRAMESIZE_QHD
+    "WQXGA (2560x1600)": 21,  # FRAMESIZE_WQXGA
+    "QSXGA (2592x1944)": 24,  # FRAMESIZE_5MP (2592x1944)
 }
 
 CAMERA_QUALITIES = {
@@ -163,7 +163,7 @@ SCAN_STATE_NAMES = {
 
 @dataclass
 class DeviceStatus:
-    """17-byte packed DeviceStatus struct (little-endian)."""
+    """18-byte packed DeviceStatus struct (little-endian)."""
 
     scan_state: int = 0
     lidar_rpm: int = 0
@@ -172,14 +172,14 @@ class DeviceStatus:
     scan_duration_ms: int = 0
     battery_pct: int = 0xFF
     camera_streaming: int = 0
+    sensor_flags: int = 0  # bit0=LiDAR, bit1=IMU, bit2=Camera, bit3=SD
 
-    STRUCT_FORMAT = "<BHIIIBBx"  # x is padding to handle 17 bytes manually
-    STRUCT_SIZE = 17
+    STRUCT_SIZE = 18
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
-        if len(data) < cls.STRUCT_SIZE:
-            raise ValueError(f"DeviceStatus needs {cls.STRUCT_SIZE} bytes, got {len(data)}")
+        if len(data) < 17:
+            raise ValueError(f"DeviceStatus needs at least 17 bytes, got {len(data)}")
         scan_state = data[0]
         lidar_rpm = struct.unpack_from("<H", data, 1)[0]
         sd_free_mb = struct.unpack_from("<I", data, 3)[0]
@@ -187,6 +187,7 @@ class DeviceStatus:
         scan_duration_ms = struct.unpack_from("<I", data, 11)[0]
         battery_pct = data[15]
         camera_streaming = data[16]
+        sensor_flags = data[17] if len(data) >= 18 else 0
         return cls(
             scan_state=scan_state,
             lidar_rpm=lidar_rpm,
@@ -195,6 +196,7 @@ class DeviceStatus:
             scan_duration_ms=scan_duration_ms,
             battery_pct=battery_pct,
             camera_streaming=camera_streaming,
+            sensor_flags=sensor_flags,
         )
 
     @property
@@ -219,6 +221,22 @@ class DeviceStatus:
         if minutes > 0:
             return f"{minutes}m {seconds % 60}s"
         return f"{seconds}s"
+
+    @property
+    def lidar_ok(self) -> bool:
+        return bool(self.sensor_flags & 0x01)
+
+    @property
+    def imu_ok(self) -> bool:
+        return bool(self.sensor_flags & 0x02)
+
+    @property
+    def camera_ok(self) -> bool:
+        return bool(self.sensor_flags & 0x04)
+
+    @property
+    def sd_ok(self) -> bool:
+        return bool(self.sensor_flags & 0x08)
 
 
 @dataclass

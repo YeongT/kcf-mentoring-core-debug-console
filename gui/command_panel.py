@@ -49,7 +49,13 @@ from protocol import (
     INIT_FLAG_START_STREAM,
     SCAN_IDLE,
     SCAN_SCANNING,
+    SCAN_MODE_NAMES,
     parse_status,
+    parse_response,
+    LidarInfo,
+    LidarHealth,
+    CameraInfo,
+    DeviceInfo,
     build_camera_set_param,
     CAMERA_RESOLUTIONS,
     CAMERA_QUALITIES,
@@ -80,6 +86,7 @@ class CommandPanel(QGroupBox):
         connection.device_connected.connect(self._on_connected)
         connection.device_disconnected.connect(self._on_disconnected)
         connection.status_received.connect(self._on_status)
+        connection.response_received.connect(self._on_response)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -295,6 +302,8 @@ class CommandPanel(QGroupBox):
         self._btn_reconnect.setText("Reconnect")
         self._btn_reconnect.setStyleSheet("")
         self._set_enabled(True)
+        # Sync UI settings into INIT_ACK for this and future connections
+        self._sync_init_settings()
         # Apply initial status from INIT handshake
         if _initial_status:
             self._on_status(_initial_status)
@@ -303,12 +312,9 @@ class CommandPanel(QGroupBox):
         self._scanning = False
         self._streaming = False
         self._sync_init_settings()
-        # Reset button text before disabling
         self._btn_scan.setText("Start Scan")
         self._btn_stream.setText("Start Stream")
-        self._lidar_health_label.setText("Health: --")
-        self._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
-        self._lidar_info_label.setText("Model: -- | FW: -- | HW: --")
+        self.reset_lidar_state()
         self._set_enabled(False)
         if self._reconnecting:
             self._btn_reconnect.setText("Reconnecting...")
@@ -375,18 +381,43 @@ class CommandPanel(QGroupBox):
         grid = QGridLayout()
         grid.setSpacing(4)
         grid.setContentsMargins(0, 0, 0, 0)
-        buttons = [
+
+        view = self._current_view
+        if view == "camera":
+            # Camera-specific buttons only
+            buttons = [
+                self._btn_stream, self._btn_capture,
+                self._btn_status, self._btn_reconnect,
+            ]
+        elif view == "lidar":
+            # LiDAR-specific buttons only
+            buttons = [
+                self._btn_scan, self._btn_status,
+                self._btn_reboot, self._btn_reconnect,
+            ]
+        else:
+            # Split: all main buttons including Reboot
+            buttons = [
+                self._btn_stream, self._btn_scan, self._btn_status,
+                self._btn_capture, self._btn_reboot, self._btn_reconnect,
+            ]
+
+        # Hide buttons not in current view
+        all_action_buttons = [
             self._btn_stream, self._btn_scan, self._btn_status,
             self._btn_capture, self._btn_reconnect, self._btn_reset,
+            self._btn_reboot,
         ]
+        for btn in all_action_buttons:
+            btn.setVisible(btn in buttons)
+
         if self._sidebar_mode:
-            # 2 columns x 3 rows
-            for i, btn in enumerate(buttons):
-                grid.addWidget(btn, i // 2, i % 2)
+            cols = 2
         else:
-            # 3 columns x 2 rows
-            for i, btn in enumerate(buttons):
-                grid.addWidget(btn, i // 3, i % 3)
+            cols = 3
+        for i, btn in enumerate(buttons):
+            grid.addWidget(btn, i // cols, i % cols)
+
         self._btn_container.setLayout(grid)
 
     def _apply_params_layout(self) -> None:
@@ -401,48 +432,40 @@ class CommandPanel(QGroupBox):
         view = self._current_view
         show_camera = view in ("split", "camera")
         show_lidar = view in ("split", "lidar")
-
-        # Hide all param widgets first, show selectively
-        camera_widgets = [
-            self._lbl_interval, self._interval_spin,
-            self._lbl_resolution, self._resolution_combo,
-            self._lbl_quality, self._quality_combo, self._btn_apply_camera,
-        ]
-        lidar_widgets = [self._lbl_rpm, self._rpm_spin, self._btn_rpm]
-        camera_adv_widgets = [
-            self._brightness_spin, self._contrast_spin, self._saturation_spin,
-            self._effect_combo, self._whitebal_check, self._exposure_check,
-            self._aec_spin, self._hmirror_check, self._vflip_check,
-            self._btn_camera_info,
-        ]
-        lidar_ctrl_widgets = [
-            self._btn_lidar_info, self._btn_lidar_health, self._btn_lidar_reset,
-            self._lidar_health_label, self._lidar_info_label,
-            *self._rpm_presets,
-            *self._scan_mode_buttons,
-        ]
-        device_widgets = [self._btn_device_info, self._btn_reboot]
-
-        for w in camera_widgets:
-            w.setVisible(show_camera)
-        for w in lidar_widgets:
-            w.setVisible(show_lidar)
-
-        # Camera advanced and lidar controls only in sidebar mode
         is_camera_sidebar = self._sidebar_mode and view == "camera"
         is_lidar_sidebar = self._sidebar_mode and view == "lidar"
-        for w in camera_adv_widgets:
+
+        # Camera basic params
+        for w in [self._lbl_interval, self._interval_spin,
+                  self._lbl_resolution, self._resolution_combo,
+                  self._lbl_quality, self._quality_combo, self._btn_apply_camera]:
+            w.setVisible(show_camera)
+
+        # LiDAR basic params (RPM spinner only in split or lidar view)
+        for w in [self._lbl_rpm, self._rpm_spin, self._btn_rpm]:
+            w.setVisible(show_lidar)
+
+        # Camera advanced controls only in camera sidebar
+        for w in [self._brightness_spin, self._contrast_spin, self._saturation_spin,
+                  self._effect_combo, self._whitebal_check, self._exposure_check,
+                  self._aec_spin, self._hmirror_check, self._vflip_check,
+                  self._btn_camera_info]:
             w.setVisible(is_camera_sidebar)
-        for w in lidar_ctrl_widgets:
+
+        # LiDAR extended controls only in lidar sidebar
+        for w in [self._btn_lidar_info, self._btn_lidar_health, self._btn_lidar_reset,
+                  self._lidar_health_label, self._lidar_info_label,
+                  *self._rpm_presets, *self._scan_mode_buttons]:
             w.setVisible(is_lidar_sidebar)
-        for w in device_widgets:
-            w.setVisible(self._sidebar_mode)
+
+        # Device info button: in camera/lidar sidebar bottom rows
+        self._btn_device_info.setVisible(is_camera_sidebar or is_lidar_sidebar)
 
         self._camera_adv_container.setVisible(is_camera_sidebar)
         self._lidar_ctrl_container.setVisible(is_lidar_sidebar)
 
         if self._sidebar_mode:
-            # --- Params section ---
+            # --- Params section (vertical layout for sidebar) ---
             vbox = QVBoxLayout()
             vbox.setContentsMargins(0, 0, 0, 0)
             vbox.setSpacing(4)
@@ -451,34 +474,30 @@ class CommandPanel(QGroupBox):
             self._params_hsep2.hide()
 
             if show_camera:
-                row1 = QHBoxLayout()
-                row1.setSpacing(8)
-                row1.addWidget(self._lbl_interval)
-                row1.addWidget(self._interval_spin)
-                row1.addStretch()
-                vbox.addLayout(row1)
-                row3 = QHBoxLayout()
-                row3.setSpacing(8)
-                row3.addWidget(self._lbl_resolution)
-                row3.addWidget(self._resolution_combo)
-                row3.addStretch()
-                vbox.addLayout(row3)
-                row4 = QHBoxLayout()
-                row4.setSpacing(8)
-                row4.addWidget(self._lbl_quality)
-                row4.addWidget(self._quality_combo)
-                row4.addWidget(self._btn_apply_camera)
-                row4.addStretch()
-                vbox.addLayout(row4)
+                for lbl, widget in [(self._lbl_interval, self._interval_spin),
+                                    (self._lbl_resolution, self._resolution_combo)]:
+                    row = QHBoxLayout()
+                    row.setSpacing(8)
+                    row.addWidget(lbl)
+                    row.addWidget(widget)
+                    row.addStretch()
+                    vbox.addLayout(row)
+                row_q = QHBoxLayout()
+                row_q.setSpacing(8)
+                row_q.addWidget(self._lbl_quality)
+                row_q.addWidget(self._quality_combo)
+                row_q.addWidget(self._btn_apply_camera)
+                row_q.addStretch()
+                vbox.addLayout(row_q)
 
             if show_lidar:
-                row2 = QHBoxLayout()
-                row2.setSpacing(8)
-                row2.addWidget(self._lbl_rpm)
-                row2.addWidget(self._rpm_spin)
-                row2.addWidget(self._btn_rpm)
-                row2.addStretch()
-                vbox.addLayout(row2)
+                row_rpm = QHBoxLayout()
+                row_rpm.setSpacing(8)
+                row_rpm.addWidget(self._lbl_rpm)
+                row_rpm.addWidget(self._rpm_spin)
+                row_rpm.addWidget(self._btn_rpm)
+                row_rpm.addStretch()
+                vbox.addLayout(row_rpm)
 
             self._params_container.setLayout(vbox)
 
@@ -521,7 +540,7 @@ class CommandPanel(QGroupBox):
                 btn_row.setSpacing(4)
                 btn_row.addWidget(self._btn_camera_info)
                 btn_row.addWidget(self._btn_device_info)
-                btn_row.addWidget(self._btn_reboot)
+                btn_row.addStretch()
                 adv.addLayout(btn_row)
 
                 self._camera_adv_container.setLayout(adv)
@@ -586,7 +605,7 @@ class CommandPanel(QGroupBox):
                 lctrl.addWidget(self._lidar_health_label)
                 lctrl.addWidget(self._lidar_info_label)
 
-                # Device buttons at bottom
+                # Device info at bottom
                 sep3 = QLabel()
                 sep3.setFixedHeight(1)
                 sep3.setStyleSheet("background-color: #333;")
@@ -596,7 +615,6 @@ class CommandPanel(QGroupBox):
                 bottom_row.setSpacing(3)
                 bottom_row.addWidget(self._btn_device_info)
                 bottom_row.addStretch()
-                bottom_row.addWidget(self._btn_reboot)
                 lctrl.addLayout(bottom_row)
 
                 self._lidar_ctrl_container.setLayout(lctrl)
@@ -655,6 +673,72 @@ class CommandPanel(QGroupBox):
         else:
             s.flags &= ~INIT_FLAG_START_STREAM
         self._conn.init_ack_settings = s
+
+    def _on_response(self, data: bytes) -> None:
+        resp = parse_response(data)
+        if not resp:
+            return
+
+        # Scan state
+        if resp.cmd_id == CMD_START_SCAN:
+            self._scanning = resp.ok
+            self._sync_buttons()
+        elif resp.cmd_id == CMD_STOP_SCAN:
+            if resp.ok:
+                self._scanning = False
+            self._sync_buttons()
+
+        # Stream state
+        elif resp.cmd_id == CMD_START_STREAM:
+            self._streaming = resp.ok
+            self._sync_buttons()
+        elif resp.cmd_id == CMD_STOP_STREAM:
+            if resp.ok:
+                self._streaming = False
+            self._sync_buttons()
+
+        # LiDAR info/health
+        elif resp.cmd_id == CMD_LIDAR_GET_INFO and resp.ok:
+            info = LidarInfo.from_bytes(resp.payload)
+            if info:
+                self.update_lidar_info(info)
+                self._conn.log_message.emit(
+                    f"LidarInfo: model={info.major_model} FW={info.firmware_str} "
+                    f"HW={info.hardware} Serial={info.serial}"
+                )
+        elif resp.cmd_id == CMD_LIDAR_GET_HEALTH and resp.ok:
+            health = LidarHealth.from_bytes(resp.payload)
+            if health:
+                self.update_lidar_health(health)
+                self._conn.log_message.emit(
+                    f"LidarHealth: {health.status_name} (error_code={health.error_code})"
+                )
+        elif resp.cmd_id == CMD_LIDAR_SET_SCAN_MODE and resp.ok:
+            if len(resp.payload) >= 1:
+                mode = resp.payload[0]
+                name = SCAN_MODE_NAMES.get(mode, f"Unknown({mode})")
+                self._conn.log_message.emit(f"Scan mode set to: {name}")
+
+        # Camera info
+        elif resp.cmd_id == CMD_CAMERA_GET_INFO and resp.ok:
+            info = CameraInfo.from_bytes(resp.payload)
+            if info:
+                self._conn.log_message.emit(
+                    f"CameraInfo: {info.model} | res={info.resolution} "
+                    f"quality={info.quality} streaming={'ON' if info.streaming else 'OFF'}"
+                )
+
+        # Device info
+        elif resp.cmd_id == CMD_GET_DEVICE_INFO and resp.ok:
+            info = DeviceInfo.from_bytes(resp.payload)
+            if info:
+                self._conn.log_message.emit(
+                    f"DeviceInfo: {info.device_name} | chip={info.chip_model} "
+                    f"cores={info.chip_cores} rev={info.chip_revision} | "
+                    f"heap={info.free_heap // 1024}K/{info.min_free_heap // 1024}K | "
+                    f"PSRAM={info.psram_total // (1024*1024)}M free={info.psram_free // (1024*1024)}M | "
+                    f"RSSI={info.wifi_rssi}dBm"
+                )
 
     def _toggle_scan(self) -> None:
         self._btn_scan.setEnabled(False)
@@ -727,6 +811,11 @@ class CommandPanel(QGroupBox):
             name = SCAN_MODE_NAMES.get(mode, str(mode))
             self._conn.log_message.emit(f"User command: LIDAR_SET_SCAN_MODE mode={name}")
             self._conn.send_command(CMD_LIDAR_SET_SCAN_MODE, struct.pack("B", mode))
+
+    def reset_lidar_state(self) -> None:
+        self._lidar_health_label.setText("Health: --")
+        self._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._lidar_info_label.setText("Model: -- | FW: -- | HW: --")
 
     def update_lidar_info(self, info) -> None:
         self._lidar_info_label.setText(

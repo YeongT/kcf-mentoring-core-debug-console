@@ -120,8 +120,10 @@ class CameraPanel(QGroupBox):
             self._last_fps_time = now
 
         size_kb = len(jpeg_data) / 1024
+        res_w = image.width()
+        res_h = image.height()
         self._info_label.setText(
-            f"FPS: {self._fps:.1f} | Size: {size_kb:.1f} KB | Frames: {self._frame_count}"
+            f"FPS: {self._fps:.1f} | {res_w}x{res_h} | {size_kb:.1f} KB | Frames: {self._frame_count}"
         )
 
     def _apply_pixmap(self) -> None:

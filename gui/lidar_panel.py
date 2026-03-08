@@ -113,3 +113,9 @@ class LidarPanel(QGroupBox):
         self._frame_count += 1
         valid_pts = sum(1 for p in frame.points if p.distance_mm > 0)
         self._info_label.setText(f"Points: {valid_pts} | Frames: {self._frame_count}")
+
+    def reset(self) -> None:
+        self._canvas._points = []
+        self._canvas.update()
+        self._frame_count = 0
+        self._info_label.setText("Points: -- | Frames: 0")
