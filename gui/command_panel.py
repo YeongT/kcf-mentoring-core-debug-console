@@ -244,13 +244,8 @@ class CommandPanel(QGroupBox):
         self._lidar_ctrl_container = QWidget()
         layout.addWidget(self._lidar_ctrl_container, 0)
 
-        self._btn_lidar_info = QPushButton("Info")
-        self._btn_lidar_info.clicked.connect(lambda: self._send(CMD_LIDAR_GET_INFO))
-
-        self._btn_lidar_health = QPushButton("Health")
-        self._btn_lidar_health.clicked.connect(lambda: self._send(CMD_LIDAR_GET_HEALTH))
-
-        self._btn_lidar_reset = QPushButton("Reset")
+        self._btn_lidar_reset = QPushButton("LiDAR Reset")
+        self._btn_lidar_reset.setStyleSheet("background-color: #FF9800; color: white;")
         self._btn_lidar_reset.clicked.connect(lambda: self._send(CMD_LIDAR_RESET))
 
         # RPM preset buttons
@@ -261,7 +256,7 @@ class CommandPanel(QGroupBox):
             btn.clicked.connect(lambda _, r=rpm_val: self._send_rpm_preset(r))
             self._rpm_presets.append(btn)
 
-        # Inline status labels
+        # Inline status labels (auto-populated on connect)
         self._lidar_health_label = QLabel("Health: --")
         self._lidar_health_label.setStyleSheet("color: #888; font-size: 10px;")
         self._lidar_info_label = QLabel("Model: -- | FW: -- | HW: --")
@@ -294,7 +289,6 @@ class CommandPanel(QGroupBox):
         self._apply_button_grid()
         self._apply_params_layout()
 
-        layout.addStretch(1)
         self.setLayout(layout)
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
@@ -307,6 +301,9 @@ class CommandPanel(QGroupBox):
         # Apply initial status from INIT handshake
         if _initial_status:
             self._on_status(_initial_status)
+        # Auto-fetch LiDAR info and health on connect
+        self._send(CMD_LIDAR_GET_INFO)
+        self._send(CMD_LIDAR_GET_HEALTH)
 
     def _on_disconnected(self) -> None:
         self._scanning = False
@@ -441,9 +438,9 @@ class CommandPanel(QGroupBox):
                   self._lbl_quality, self._quality_combo, self._btn_apply_camera]:
             w.setVisible(show_camera)
 
-        # LiDAR basic params (RPM spinner only in split or lidar view)
+        # LiDAR basic params — RPM spinner in split view only (sidebar uses presets)
         for w in [self._lbl_rpm, self._rpm_spin, self._btn_rpm]:
-            w.setVisible(show_lidar)
+            w.setVisible(show_lidar and not is_lidar_sidebar)
 
         # Camera advanced controls only in camera sidebar
         for w in [self._brightness_spin, self._contrast_spin, self._saturation_spin,
@@ -453,7 +450,7 @@ class CommandPanel(QGroupBox):
             w.setVisible(is_camera_sidebar)
 
         # LiDAR extended controls only in lidar sidebar
-        for w in [self._btn_lidar_info, self._btn_lidar_health, self._btn_lidar_reset,
+        for w in [self._btn_lidar_reset,
                   self._lidar_health_label, self._lidar_info_label,
                   *self._rpm_presets, *self._scan_mode_buttons]:
             w.setVisible(is_lidar_sidebar)
@@ -556,14 +553,11 @@ class CommandPanel(QGroupBox):
                 sep.setStyleSheet("background-color: #333;")
                 lctrl.addWidget(sep)
 
-                lbl = QLabel("LiDAR Controls")
-                lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
-                lctrl.addLayout(self._make_param_row(lbl, None))
-
-                # RPM presets
+                # RPM: spinner + presets in one row
                 rpm_lbl = QLabel("RPM")
-                rpm_lbl.setStyleSheet("color: #666; font-size: 9px;")
-                lctrl.addWidget(rpm_lbl)
+                rpm_lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+                lctrl.addLayout(self._make_param_row(rpm_lbl, None))
+
                 rpm_row = QHBoxLayout()
                 rpm_row.setSpacing(0)
                 for i, btn in enumerate(self._rpm_presets):
@@ -573,10 +567,11 @@ class CommandPanel(QGroupBox):
                 rpm_row.addStretch()
                 lctrl.addLayout(rpm_row)
 
-                # Scan mode
-                mode_lbl = QLabel("Mode")
-                mode_lbl.setStyleSheet("color: #666; font-size: 9px;")
-                lctrl.addWidget(mode_lbl)
+                # Scan mode toggle
+                mode_lbl = QLabel("Scan Mode")
+                mode_lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+                lctrl.addLayout(self._make_param_row(mode_lbl, None))
+
                 mode_row = QHBoxLayout()
                 mode_row.setSpacing(0)
                 for i, btn in enumerate(self._scan_mode_buttons):
@@ -588,15 +583,7 @@ class CommandPanel(QGroupBox):
                 mode_row.addStretch()
                 lctrl.addLayout(mode_row)
 
-                # Query buttons
-                btn_row1 = QHBoxLayout()
-                btn_row1.setSpacing(3)
-                btn_row1.addWidget(self._btn_lidar_info)
-                btn_row1.addWidget(self._btn_lidar_health)
-                btn_row1.addWidget(self._btn_lidar_reset)
-                lctrl.addLayout(btn_row1)
-
-                # Inline status display
+                # LiDAR status (auto-populated on connect)
                 sep2 = QLabel()
                 sep2.setFixedHeight(1)
                 sep2.setStyleSheet("background-color: #333;")
@@ -605,14 +592,15 @@ class CommandPanel(QGroupBox):
                 lctrl.addWidget(self._lidar_health_label)
                 lctrl.addWidget(self._lidar_info_label)
 
-                # Device info at bottom
+                # Bottom: Reset + Device Info
                 sep3 = QLabel()
                 sep3.setFixedHeight(1)
                 sep3.setStyleSheet("background-color: #333;")
                 lctrl.addWidget(sep3)
 
                 bottom_row = QHBoxLayout()
-                bottom_row.setSpacing(3)
+                bottom_row.setSpacing(4)
+                bottom_row.addWidget(self._btn_lidar_reset)
                 bottom_row.addWidget(self._btn_device_info)
                 bottom_row.addStretch()
                 lctrl.addLayout(bottom_row)

@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QMessageBox,
     QButtonGroup,
+    QScrollArea,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QPixmap, QPainter, QColor, QPolygon
@@ -183,15 +184,32 @@ class MainWindow(QMainWindow):
         self._viz_splitter.setStretchFactor(1, 4)
         self._h_splitter.addWidget(self._viz_splitter)
 
-        # Right sidebar (single-view modes)
-        self._right_widget = QWidget()
+        # Right sidebar (single-view modes) — scrollable
+        self._right_scroll = QScrollArea()
+        self._right_scroll.setWidgetResizable(True)
+        self._right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._right_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; }
+            QScrollBar:vertical {
+                background: transparent; width: 6px; margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #444; border-radius: 3px; min-height: 20px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
+        self._right_inner = QWidget()
         self._right_layout = QVBoxLayout()
-        self._right_layout.setContentsMargins(6, 4, 6, 4)
+        self._right_layout.setContentsMargins(6, 4, 2, 4)
         self._right_layout.setSpacing(10)
-        self._right_widget.setLayout(self._right_layout)
-        self._right_widget.setMinimumWidth(280)
-        self._right_widget.setMaximumWidth(360)
-        self._h_splitter.addWidget(self._right_widget)
+        self._right_inner.setLayout(self._right_layout)
+        self._right_scroll.setWidget(self._right_inner)
+        self._right_scroll.setMinimumWidth(300)
+        self._right_scroll.setMaximumWidth(380)
+        self._h_splitter.addWidget(self._right_scroll)
         self._h_splitter.setStretchFactor(0, 7)
         self._h_splitter.setStretchFactor(1, 3)
 
@@ -203,7 +221,7 @@ class MainWindow(QMainWindow):
         self._bottom_layout.setContentsMargins(0, 4, 0, 0)
         self._bottom_layout.setSpacing(8)
         self._bottom_widget.setLayout(self._bottom_layout)
-        self._bottom_widget.setMaximumHeight(220)
+        self._bottom_widget.setMaximumHeight(280)
         main_layout.addWidget(self._bottom_widget)
 
         # ============================================================
@@ -363,6 +381,8 @@ class MainWindow(QMainWindow):
         conn.raw_message_received.connect(self._on_raw_data)
         conn.log_message.connect(self._log_panel.log_text)
         self._command_panel.reset_requested.connect(self._on_reset)
+        self._server.server_stopped.connect(self._on_server_stopped)
+        self._server.server_started.connect(self._on_server_started)
 
     # ================================================================
     #  Connection events
@@ -377,6 +397,8 @@ class MainWindow(QMainWindow):
         # Apply initial status from INIT handshake if available
         if initial_status:
             self._on_status(initial_status)
+        # Request fresh status after connection to get accurate sensor flags
+        QTimer.singleShot(500, self._poll_status)
 
     def _on_disconnected(self) -> None:
         self._status_panel.set_disconnected()
@@ -448,7 +470,7 @@ class MainWindow(QMainWindow):
 
         if mode == "split":
             # Full-width viz, controls at bottom
-            self._right_widget.hide()
+            self._right_scroll.hide()
             self._status_panel.setMaximumWidth(16777215)
             self._command_panel.set_sidebar_mode(False, "split")
             self._bottom_layout.addWidget(self._status_panel, 5)
@@ -461,7 +483,7 @@ class MainWindow(QMainWindow):
             self._command_panel.set_sidebar_mode(True, mode)
             self._right_layout.addWidget(self._status_panel)
             self._right_layout.addWidget(self._command_panel, 1)
-            self._right_widget.show()
+            self._right_scroll.show()
 
         self.setUpdatesEnabled(True)
 
@@ -578,7 +600,7 @@ class MainWindow(QMainWindow):
         dlg = _SettingsDialog(self)
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.FramelessWindowHint)
         dlg.setStyleSheet(self._POPUP_STYLE)
-        dlg.setFixedWidth(300)
+        dlg.setFixedWidth(360)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
@@ -726,6 +748,30 @@ class MainWindow(QMainWindow):
         btn_server.clicked.connect(on_server_click)
         dlg.enter_actions[port_spin] = on_port_changed
         server_row.addWidget(btn_server)
+
+        btn_restart = QPushButton("Restart")
+        btn_restart.setStyleSheet("background-color: #1565C0; color: white;")
+        btn_restart.setEnabled(self._server.running)
+
+        def on_restart_click() -> None:
+            btn_restart.setEnabled(False)
+            btn_restart.setText("Restarting...")
+            self._restart_server()
+
+        btn_restart.clicked.connect(on_restart_click)
+        server_row.addWidget(btn_restart)
+
+        def update_restart_btn() -> None:
+            try:
+                if btn_restart.isVisible():
+                    btn_restart.setText("Restart")
+                    btn_restart.setEnabled(self._server.running)
+            except RuntimeError:
+                pass
+
+        self._server.server_started.connect(update_restart_btn)
+        self._server.server_stopped.connect(update_restart_btn)
+
         form.addLayout(server_row)
 
         outer.addLayout(form)
@@ -734,6 +780,11 @@ class MainWindow(QMainWindow):
         def on_dialog_finished() -> None:
             self._server.server_started.disconnect(set_running_ui)
             self._server.server_failed.disconnect(set_stopped_ui)
+            try:
+                self._server.server_started.disconnect(update_restart_btn)
+                self._server.server_stopped.disconnect(update_restart_btn)
+            except (TypeError, RuntimeError):
+                pass
 
         dlg.finished.connect(on_dialog_finished)
         port_spin.setFocus()
@@ -762,6 +813,21 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def _on_server_stopped(self) -> None:
+        self._update_server_label()
+        self._status_panel.set_disconnected()
+        self._status_timer.stop()
+        self._uptime_timer.stop()
+
+    def _on_server_started(self) -> None:
+        self._update_server_label()
+
+    def _restart_server(self) -> None:
+        self._status_timer.stop()
+        self._uptime_timer.stop()
+        self._status_panel.set_disconnected()
+        self._server.restart()
 
     def _update_server_label(self) -> None:
         if self._server.running:

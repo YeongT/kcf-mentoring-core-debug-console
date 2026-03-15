@@ -1,6 +1,7 @@
 """WebSocket server that accepts ESP32 device connections and bridges to Qt GUI."""
 
 import asyncio
+import socket
 import threading
 from typing import Optional
 
@@ -39,6 +40,7 @@ class DeviceConnection(QObject):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._device_name: str = ""
         self._seq: int = 0
+        self._conn_id: int = 0  # incremented on each new connection
         self._init_ack_settings = InitAckSettings()
 
     @property
@@ -106,18 +108,36 @@ class DeviceConnection(QObject):
             except Exception:
                 pass
 
-    def _set_connection(self, ws: ServerConnection, loop: asyncio.AbstractEventLoop) -> None:
+    def _set_connection(self, ws: ServerConnection, loop: asyncio.AbstractEventLoop) -> int:
+        # Close previous connection if still active
+        old_ws = self._ws
+        if old_ws and old_ws != ws:
+            asyncio.ensure_future(self._force_close(old_ws), loop=loop)
         self._ws = ws
         self._loop = loop
+        self._conn_id += 1
+        return self._conn_id
 
-    def _clear_connection(self) -> None:
-        self._ws = None
+    def _clear_connection(self, conn_id: int) -> bool:
+        """Clear connection only if conn_id matches current. Returns True if cleared."""
+        if conn_id == self._conn_id:
+            self._ws = None
+            return True
+        return False  # stale disconnect, ignore
+
+    @staticmethod
+    async def _force_close(ws: ServerConnection) -> None:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 class WebSocketServer(QObject):
     """Asyncio WebSocket server running in a background thread."""
 
     server_started = pyqtSignal()
+    server_stopped = pyqtSignal()  # emitted when server stops (crash or manual)
     server_failed = pyqtSignal(str)  # error message
 
     def __init__(self, connection: DeviceConnection, host: str = "0.0.0.0", port: int = 3000):
@@ -156,7 +176,7 @@ class WebSocketServer(QObject):
         if not self._running:
             return
         self._running = False
-        self._connection._clear_connection()
+        self._connection._clear_connection(self._connection._conn_id)
         if self._loop:
             if self._server:
                 self._loop.call_soon_threadsafe(self._server.close)
@@ -168,6 +188,14 @@ class WebSocketServer(QObject):
         self._thread = None
         self._loop = None
         self._server = None
+        self.server_stopped.emit()
+
+    def restart(self) -> None:
+        """Stop and restart the server after socket release."""
+        self.stop()
+        import time
+        time.sleep(0.3)
+        self.start()
 
     def _cancel_tasks(self) -> None:
         for task in asyncio.all_tasks(self._loop):
@@ -187,14 +215,30 @@ class WebSocketServer(QObject):
             return
         self._running = True
         self.server_started.emit()
-        loop.run_forever()
-        loop.close()
+        try:
+            loop.run_forever()
+        except Exception as e:
+            self._connection.log_message.emit(f"Server crashed: {e}")
+        finally:
+            loop.close()
+            if self._running:
+                # Loop exited unexpectedly
+                self._running = False
+                self._connection._clear_connection(self._connection._conn_id)
+                self._connection.log_message.emit("Server stopped unexpectedly")
+                self.server_stopped.emit()
 
     async def _setup(self) -> None:
+        # Create socket with SO_REUSEADDR to allow quick restart
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self._host, self._port))
+        sock.listen()
+        sock.setblocking(False)
+
         self._server = await serve(
             self._handle_connection,
-            self._host,
-            self._port,
+            sock=sock,
             max_size=2**20,  # 1MB max message
         )
         self._connection.log_message.emit(f"WebSocket server listening on {self._host}:{self._port}")
@@ -236,7 +280,7 @@ class WebSocketServer(QObject):
             conn.log_message.emit(f"Legacy handshake from '{device_name}'")
             init_msg = None
 
-        conn._set_connection(ws, loop)
+        conn_id = conn._set_connection(ws, loop)
         conn._device_name = device_name
 
         # Send INIT_ACK with pre-configured settings
@@ -287,6 +331,8 @@ class WebSocketServer(QObject):
         except Exception as e:
             conn.log_message.emit(f"Connection error: {e}")
         finally:
-            conn._clear_connection()
-            conn.device_disconnected.emit()
-            conn.log_message.emit(f"Device disconnected: {device_name}")
+            if conn._clear_connection(conn_id):
+                conn.device_disconnected.emit()
+                conn.log_message.emit(f"Device disconnected: {device_name}")
+            else:
+                conn.log_message.emit(f"Stale connection cleaned up: {device_name}")
