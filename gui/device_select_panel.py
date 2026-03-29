@@ -10,6 +10,35 @@ from PyQt6.QtGui import QFont
 _MONO = QFont("Consolas", 10)
 _MONO_SM = QFont("Consolas", 9)
 
+_BTN_CONNECT = (
+    "QPushButton {"
+    "  background-color: #1565C0; color: white;"
+    "  border-radius: 4px; border: none;"
+    "}"
+    "QPushButton:hover { background-color: #1976D2; }"
+    "QPushButton:pressed { background-color: #0D47A1; }"
+)
+_BTN_CONNECTED = (
+    "QPushButton {"
+    "  background-color: #2E7D32; color: white;"
+    "  border-radius: 4px; border: none;"
+    "}"
+)
+_CARD_NORMAL = (
+    "QWidget#device_card {"
+    "  background-color: #1a1a1a;"
+    "  border: 1px solid #333;"
+    "  border-radius: 8px;"
+    "}"
+)
+_CARD_CONNECTED = (
+    "QWidget#device_card {"
+    "  background-color: #1a2e1a;"
+    "  border: 1px solid #2E7D32;"
+    "  border-radius: 8px;"
+    "}"
+)
+
 
 class DeviceSelectPanel(QWidget):
     """Full-screen device selection panel with discovered device list."""
@@ -28,45 +57,46 @@ class DeviceSelectPanel(QWidget):
 
         # Center content with max width
         center = QWidget()
-        center.setMaximumWidth(500)
+        center.setMaximumWidth(520)
         layout = QVBoxLayout()
-        layout.setSpacing(16)
-        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(12)
+        layout.setContentsMargins(40, 0, 40, 40)
 
         # Title
-        title = QLabel("Device Selection")
-        title.setFont(QFont("Consolas", 18, QFont.Weight.Bold))
+        title = QLabel("Core Device Console")
+        title.setFont(QFont("Consolas", 16, QFont.Weight.Bold))
         title.setStyleSheet("color: #E0E0E0;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        # Subtitle
-        subtitle = QLabel("Discovered devices on the network")
-        subtitle.setFont(_MONO_SM)
-        subtitle.setStyleSheet("color: #607D8B;")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(subtitle)
+        # Subtitle with device count
+        self._subtitle = QLabel("Scanning for devices...")
+        self._subtitle.setFont(_MONO_SM)
+        self._subtitle.setStyleSheet("color: #546E7A;")
+        self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._subtitle)
 
-        layout.addSpacing(8)
+        layout.addSpacing(4)
 
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #333;")
+        sep.setStyleSheet("color: #2a2a2a;")
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        layout.addSpacing(8)
+        layout.addSpacing(4)
 
         # Device list container
         self._list_layout = QVBoxLayout()
-        self._list_layout.setSpacing(6)
+        self._list_layout.setSpacing(8)
         self._list_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._placeholder = QLabel("Scanning for devices...")
+        self._placeholder = QLabel("\u25cc  Waiting for device broadcasts...")
         self._placeholder.setFont(_MONO)
-        self._placeholder.setStyleSheet("color: #546E7A;")
+        self._placeholder.setStyleSheet("color: #37474F;")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setMinimumHeight(60)
         self._list_layout.addWidget(self._placeholder)
 
         layout.addLayout(self._list_layout)
@@ -99,34 +129,39 @@ class DeviceSelectPanel(QWidget):
         # Add/update devices
         for device in devices:
             if device.name not in self._device_widgets:
-                row = self._create_device_card(device, connected_device)
-                self._device_widgets[device.name] = row
-                self._list_layout.addWidget(row)
+                card = self._create_device_card(device, connected_device)
+                self._device_widgets[device.name] = card
+                self._list_layout.addWidget(card)
             else:
                 self._update_device_card(device.name, device, connected_device)
 
-        has_devices = len(self._device_widgets) > 0
+        count = len(self._device_widgets)
+        has_devices = count > 0
         self._placeholder.setVisible(not has_devices)
 
+        if has_devices:
+            self._subtitle.setText(f"{count} device{'s' if count > 1 else ''} found on network")
+            self._subtitle.setStyleSheet("color: #78909C;")
+        else:
+            self._subtitle.setText("Scanning for devices...")
+            self._subtitle.setStyleSheet("color: #546E7A;")
+
     def _create_device_card(self, device, connected_device: str = "") -> QWidget:
+        is_connected = device.name == connected_device
+
         card = QWidget()
-        card.setStyleSheet(
-            "QWidget#device_card {"
-            "  background-color: #1a1a1a;"
-            "  border: 1px solid #333;"
-            "  border-radius: 6px;"
-            "}"
-        )
         card.setObjectName("device_card")
+        card.setStyleSheet(_CARD_CONNECTED if is_connected else _CARD_NORMAL)
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
-        # Green dot
+        # Status dot
         dot = QLabel("\u25cf")
-        dot.setFont(QFont("Consolas", 12))
-        dot.setStyleSheet("color: #4CAF50;")
-        dot.setFixedWidth(16)
+        dot.setFont(QFont("Consolas", 14))
+        dot.setStyleSheet("color: #4CAF50;" if is_connected else "color: #78909C;")
+        dot.setFixedWidth(18)
+        dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(dot)
 
         # Info column
@@ -142,39 +177,23 @@ class DeviceSelectPanel(QWidget):
         info.addWidget(ip_lbl)
         layout.addLayout(info, 1)
 
-        # Connect button
-        btn = QPushButton("Connect")
-        btn.setFixedSize(90, 32)
-        btn.setFont(QFont("Consolas", 10))
-        btn.setStyleSheet(
-            "QPushButton {"
-            "  background-color: #1565C0; color: white;"
-            "  border-radius: 4px; border: none;"
-            "}"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #0D47A1; }"
-        )
+        # Button
+        btn = QPushButton("Connected" if is_connected else "Connect")
+        btn.setFixedSize(100, 34)
+        btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        btn.setStyleSheet(_BTN_CONNECTED if is_connected else _BTN_CONNECT)
+        btn.setEnabled(not is_connected)
+
         dev_name = device.name
         dev_ip = device.ip_address
         btn.clicked.connect(lambda: self.connect_requested.emit(dev_name, dev_ip))
-
-        if device.name == connected_device:
-            btn.setText("Connected")
-            btn.setEnabled(False)
-            btn.setStyleSheet(
-                "QPushButton { background-color: #2E7D32; color: white;"
-                " border-radius: 4px; border: none; }"
-            )
-
         layout.addWidget(btn)
 
-        # Store refs
+        # Store refs for updates
         card._dot = dot
         card._name_lbl = name_lbl
         card._ip_lbl = ip_lbl
         card._btn = btn
-        card._dev_name = device.name
-        card._dev_ip = device.ip_address
 
         return card
 
@@ -182,5 +201,19 @@ class DeviceSelectPanel(QWidget):
         card = self._device_widgets.get(name)
         if not card:
             return
+
+        is_connected = name == connected_device
         card._ip_lbl.setText(device.ip_address)
-        card._dev_ip = device.ip_address
+
+        # Update connected state
+        card.setStyleSheet(_CARD_CONNECTED if is_connected else _CARD_NORMAL)
+        card._dot.setStyleSheet("color: #4CAF50;" if is_connected else "color: #78909C;")
+
+        if is_connected:
+            card._btn.setText("Connected")
+            card._btn.setEnabled(False)
+            card._btn.setStyleSheet(_BTN_CONNECTED)
+        else:
+            card._btn.setText("Connect")
+            card._btn.setEnabled(True)
+            card._btn.setStyleSheet(_BTN_CONNECT)
