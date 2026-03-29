@@ -407,7 +407,6 @@ class MainWindow(QMainWindow):
         self._command_panel.reset_requested.connect(self._on_reset)
         self._device_select.connect_requested.connect(self._on_connect_device_requested)
         self._server.server_stopped.connect(self._on_server_stopped)
-        self._server.server_started.connect(self._on_server_started)
 
         # UDP Discovery callback (runs in background thread, use QTimer to cross to GUI thread)
         if self._discovery:
@@ -461,11 +460,9 @@ class MainWindow(QMainWindow):
     def _get_local_ip() -> str:
         """Get this machine's LAN IP address."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
         except OSError:
             return "127.0.0.1"
 
@@ -794,9 +791,6 @@ class MainWindow(QMainWindow):
         self._status_timer.stop()
         self._uptime_timer.stop()
         self._show_device_select()
-
-    def _on_server_started(self) -> None:
-        pass
 
     def _save_settings(self) -> None:
         self._settings["status_poll_interval"] = self._status_poll_interval

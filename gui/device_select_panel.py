@@ -99,7 +99,7 @@ class DeviceSelectPanel(QWidget):
         # Add/update devices
         for device in devices:
             if device.name not in self._device_widgets:
-                row = self._create_device_card(device)
+                row = self._create_device_card(device, connected_device)
                 self._device_widgets[device.name] = row
                 self._list_layout.addWidget(row)
             else:
@@ -108,7 +108,7 @@ class DeviceSelectPanel(QWidget):
         has_devices = len(self._device_widgets) > 0
         self._placeholder.setVisible(not has_devices)
 
-    def _create_device_card(self, device) -> QWidget:
+    def _create_device_card(self, device, connected_device: str = "") -> QWidget:
         card = QWidget()
         card.setStyleSheet(
             "QWidget#device_card {"
@@ -157,6 +157,15 @@ class DeviceSelectPanel(QWidget):
         dev_name = device.name
         dev_ip = device.ip_address
         btn.clicked.connect(lambda: self.connect_requested.emit(dev_name, dev_ip))
+
+        if device.name == connected_device:
+            btn.setText("Connected")
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2E7D32; color: white;"
+                " border-radius: 4px; border: none; }"
+            )
+
         layout.addWidget(btn)
 
         # Store refs
