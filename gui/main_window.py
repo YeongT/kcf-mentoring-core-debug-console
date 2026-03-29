@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QButtonGroup,
     QScrollArea,
+    QStackedWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QPixmap, QPainter, QColor, QPolygon
@@ -41,6 +42,7 @@ from gui.lidar_panel import LidarPanel
 from gui.status_panel import StatusPanel
 from gui.command_panel import CommandPanel
 from gui.log_panel import LogPanel
+from gui.device_select_panel import DeviceSelectPanel
 
 
 class MainWindow(QMainWindow):
@@ -118,6 +120,13 @@ class MainWindow(QMainWindow):
         self._btn_settings.clicked.connect(self._show_settings_dialog)
         left_lay.addWidget(self._btn_settings)
 
+        self._btn_devices = QPushButton("\u25c0 Devices")
+        self._btn_devices.setStyleSheet("padding: 4px 10px; font-size: 11px; color: #90CAF9;")
+        self._btn_devices.setToolTip("Back to device selection")
+        self._btn_devices.clicked.connect(self._show_device_select)
+        self._btn_devices.setVisible(False)  # shown only on console page
+        left_lay.addWidget(self._btn_devices)
+
         self._server_label = QLabel("Server: OFF")
         self._server_label.setFont(QFont("Consolas", 9))
         self._server_label.setStyleSheet("color: #F44336;")
@@ -166,17 +175,28 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(top_bar)
 
         # ============================================================
-        #  Shared panels (reparented on view switch)
+        #  Stacked widget: page 0 = device select, page 1 = console
         # ============================================================
+        self._stack = QStackedWidget()
+
+        # --- Page 0: Device Selection ---
+        self._device_select = DeviceSelectPanel()
+        self._stack.addWidget(self._device_select)  # index 0
+
+        # --- Page 1: Console ---
+        console_page = QWidget()
+        console_layout = QVBoxLayout()
+        console_layout.setSpacing(6)
+        console_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Shared panels
         self._camera_panel = CameraPanel()
         self._lidar_panel = LidarPanel()
         self._status_panel = StatusPanel()
         self._command_panel = CommandPanel(self._conn)
         self._command_panel.setMinimumWidth(280)
 
-        # ============================================================
-        #  Visualization: horizontal splitter (camera + lidar)
-        # ============================================================
+        # Visualization: horizontal splitter (camera + lidar)
         self._h_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._viz_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._viz_splitter.addWidget(self._camera_panel)
@@ -214,7 +234,7 @@ class MainWindow(QMainWindow):
         self._h_splitter.setStretchFactor(0, 7)
         self._h_splitter.setStretchFactor(1, 3)
 
-        main_layout.addWidget(self._h_splitter, 1)
+        console_layout.addWidget(self._h_splitter, 1)
 
         # Bottom controls (split-view mode)
         self._bottom_widget = QWidget()
@@ -223,13 +243,19 @@ class MainWindow(QMainWindow):
         self._bottom_layout.setSpacing(8)
         self._bottom_widget.setLayout(self._bottom_layout)
         self._bottom_widget.setMaximumHeight(280)
-        main_layout.addWidget(self._bottom_widget)
+        console_layout.addWidget(self._bottom_widget)
 
-        # ============================================================
-        #  Log panel
-        # ============================================================
+        # Log panel
         self._log_panel = LogPanel()
-        main_layout.addWidget(self._log_panel, 0)
+        console_layout.addWidget(self._log_panel, 0)
+
+        console_page.setLayout(console_layout)
+        self._stack.addWidget(console_page)  # index 1
+
+        main_layout.addWidget(self._stack, 1)
+
+        # Start on device selection page
+        self._stack.setCurrentIndex(0)
 
         central.setLayout(main_layout)
         self.setCentralWidget(central)
@@ -363,6 +389,10 @@ class MainWindow(QMainWindow):
             (screen.height() - self.height()) // 2,
         )
 
+        # Hide view mode buttons until connected
+        for btn in self._view_buttons.values():
+            btn.setVisible(False)
+
         # Update server label (auto-started from main.py)
         QTimer.singleShot(0, self._update_server_label)
 
@@ -382,7 +412,7 @@ class MainWindow(QMainWindow):
         conn.raw_message_received.connect(self._on_raw_data)
         conn.log_message.connect(self._log_panel.log_text)
         self._command_panel.reset_requested.connect(self._on_reset)
-        self._status_panel.connect_device_requested.connect(self._on_connect_device_requested)
+        self._device_select.connect_requested.connect(self._on_connect_device_requested)
         self._server.server_stopped.connect(self._on_server_stopped)
         self._server.server_started.connect(self._on_server_started)
 
@@ -400,8 +430,9 @@ class MainWindow(QMainWindow):
     def _poll_discovery(self) -> None:
         """Periodically read discovered devices from the listener (thread-safe via QTimer)."""
         if self._discovery:
+            devices = self._discovery.devices
             connected = self._conn.device_name if self._conn.connected else ""
-            self._status_panel.update_discovered_devices(self._discovery.devices, connected)
+            self._device_select.update_devices(devices, connected)
 
     def _on_connect_device_requested(self, device_name: str, device_ip: str) -> None:
         """User clicked Connect on a discovered device."""
@@ -438,6 +469,11 @@ class MainWindow(QMainWindow):
         self._total_bytes = 0
         self._uptime_timer.start()
         self._restart_status_timer()
+        # Switch to console page
+        self._stack.setCurrentIndex(1)
+        self._btn_devices.setVisible(True)
+        for btn in self._view_buttons.values():
+            btn.setVisible(True)
         # Apply initial status from INIT handshake if available
         if initial_status:
             self._on_status(initial_status)
@@ -449,6 +485,8 @@ class MainWindow(QMainWindow):
         self._uptime_timer.stop()
         self._status_timer.stop()
         self._lidar_panel.reset()
+        # Switch back to device selection
+        self._show_device_select()
 
     def _on_raw_data(self, _direction: str, data: bytes) -> None:
         self._total_bytes += len(data)
@@ -738,11 +776,19 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    def _show_device_select(self) -> None:
+        """Switch to device selection page."""
+        self._stack.setCurrentIndex(0)
+        self._btn_devices.setVisible(False)
+        for btn in self._view_buttons.values():
+            btn.setVisible(False)
+
     def _on_server_stopped(self) -> None:
         self._update_server_label()
         self._status_panel.set_disconnected()
         self._status_timer.stop()
         self._uptime_timer.stop()
+        self._show_device_select()
 
     def _on_server_started(self) -> None:
         self._update_server_label()
