@@ -179,12 +179,11 @@ class DeviceSelectPanel(QWidget):
         info.addWidget(ip_lbl)
         layout.addLayout(info, 1)
 
-        # Button
+        # Button — Connected is clickable to switch back to console
         btn = QPushButton("Connected" if is_connected else "Connect")
         btn.setFixedSize(100, 34)
         btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
         btn.setStyleSheet(_BTN_CONNECTED if is_connected else _BTN_CONNECT)
-        btn.setEnabled(not is_connected)
 
         dev_name = device.name
         dev_ip = device.ip_address
@@ -213,9 +212,7 @@ class DeviceSelectPanel(QWidget):
 
         if is_connected:
             card._btn.setText("Connected")
-            card._btn.setEnabled(False)
             card._btn.setStyleSheet(_BTN_CONNECTED)
         else:
             card._btn.setText("Connect")
-            card._btn.setEnabled(True)
             card._btn.setStyleSheet(_BTN_CONNECT)
