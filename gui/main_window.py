@@ -1,6 +1,7 @@
 """Main window layout assembling all panels."""
 
 import os
+import socket
 import tempfile
 import time
 
@@ -34,6 +35,7 @@ from protocol import (
     CMD_CAMERA_SET_PARAM,
 )
 from ws_server import DeviceConnection, WebSocketServer
+from udp_discovery import UdpDiscoveryListener
 import settings
 
 from gui.camera_panel import CameraPanel
@@ -44,10 +46,11 @@ from gui.log_panel import LogPanel
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, connection: DeviceConnection, server: WebSocketServer):
+    def __init__(self, connection: DeviceConnection, server: WebSocketServer, discovery: UdpDiscoveryListener | None = None):
         super().__init__()
         self._conn = connection
         self._server = server
+        self._discovery = discovery
         self.setWindowTitle("Core Device Test Client")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1200, 920)
@@ -381,12 +384,55 @@ class MainWindow(QMainWindow):
         conn.raw_message_received.connect(self._on_raw_data)
         conn.log_message.connect(self._log_panel.log_text)
         self._command_panel.reset_requested.connect(self._on_reset)
+        self._status_panel.connect_device_requested.connect(self._on_connect_device_requested)
         self._server.server_stopped.connect(self._on_server_stopped)
         self._server.server_started.connect(self._on_server_started)
+
+        # UDP Discovery callback (runs in background thread, use QTimer to cross to GUI thread)
+        if self._discovery:
+            self._discovery_timer = QTimer(self)
+            self._discovery_timer.setInterval(1500)
+            self._discovery_timer.timeout.connect(self._poll_discovery)
+            self._discovery_timer.start()
 
     # ================================================================
     #  Connection events
     # ================================================================
+
+    def _poll_discovery(self) -> None:
+        """Periodically read discovered devices from the listener (thread-safe via QTimer)."""
+        if self._discovery:
+            connected = self._conn.device_name if self._conn.connected else ""
+            self._status_panel.update_discovered_devices(self._discovery.devices, connected)
+
+    def _on_connect_device_requested(self, device_name: str, device_ip: str) -> None:
+        """User clicked Connect on a discovered device."""
+        if not self._server.running:
+            self._conn.log_message.emit("Cannot connect: server not running. Start the server first.")
+            return
+
+        server_ip = self._get_local_ip()
+        server_port = self._server.port
+
+        self._conn.log_message.emit(
+            f"Sending CONNECT to {device_name} @ {device_ip} -> {server_ip}:{server_port}"
+        )
+
+        if self._discovery:
+            if not self._discovery.send_connect(device_ip, server_ip, server_port):
+                self._conn.log_message.emit("Failed to send CONNECT packet")
+
+    @staticmethod
+    def _get_local_ip() -> str:
+        """Get this machine's LAN IP address."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except OSError:
+            return "127.0.0.1"
 
     def _on_connected(self, device_name: str, initial_status: bytes) -> None:
         self._status_panel.set_connected(device_name)

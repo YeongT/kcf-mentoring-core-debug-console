@@ -3,9 +3,9 @@
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QGridLayout, QLabel, QFrame, QHBoxLayout,
+    QGroupBox, QVBoxLayout, QGridLayout, QLabel, QFrame, QHBoxLayout, QPushButton, QWidget,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from protocol import DeviceStatus, SCAN_IDLE, SCAN_SCANNING
@@ -50,11 +50,15 @@ def _val_label(text: str = "--", align_right: bool = True) -> QLabel:
 
 
 class StatusPanel(QGroupBox):
+    connect_device_requested = pyqtSignal(str, str)  # device_name, device_ip
+
     def __init__(self):
         super().__init__("Device Status")
         self._labels: dict[str, QLabel] = {}
         self._dots: dict[str, QLabel] = {}
         self._status_labels: dict[str, QLabel] = {}
+        self._device_widgets: dict[str, QWidget] = {}
+        self._connected_device: str = ""
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -235,6 +239,18 @@ class StatusPanel(QGroupBox):
         scan_grid.setColumnStretch(4, 1)
         outer.addLayout(scan_grid)
 
+        outer.addSpacing(2)
+        outer.addWidget(_sep())
+
+        # ═══ DISCOVERY ══════════════════════════════════
+        outer.addWidget(_section_label("DISCOVERY"))
+        self._discovery_container = QVBoxLayout()
+        self._discovery_container.setSpacing(2)
+        self._discovery_container.setContentsMargins(4, 0, 4, 0)
+        self._discovery_placeholder = _label("Scanning...", "color: #607D8B;")
+        self._discovery_container.addWidget(self._discovery_placeholder)
+        outer.addLayout(self._discovery_container)
+
         outer.addStretch()
         self.setLayout(outer)
 
@@ -311,6 +327,100 @@ class StatusPanel(QGroupBox):
             self._status_labels[key].setText("OK" if ok else "N/C")
             self._status_labels[key].setStyleSheet(
                 "color: #4CAF50; font-weight: bold;" if ok else "color: #F44336; font-weight: bold;"
+            )
+
+    def update_discovered_devices(self, devices, connected_device: str = "") -> None:
+        """Update the discovery section with found devices as clickable rows."""
+        self._connected_device = connected_device
+        current_names = {d.name for d in devices}
+
+        # Remove stale widgets
+        for name in list(self._device_widgets.keys()):
+            if name not in current_names:
+                widget = self._device_widgets.pop(name)
+                self._discovery_container.removeWidget(widget)
+                widget.deleteLater()
+
+        # Add/update devices
+        for device in devices:
+            if device.name not in self._device_widgets:
+                row = self._create_device_row(device)
+                self._device_widgets[device.name] = row
+                self._discovery_container.addWidget(row)
+            else:
+                self._update_device_row(device.name, device, connected_device)
+
+        # Show/hide placeholder
+        has_devices = len(self._device_widgets) > 0
+        self._discovery_placeholder.setVisible(not has_devices)
+
+    def _create_device_row(self, device) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 1, 0, 1)
+        layout.setSpacing(4)
+
+        dot = QLabel("\u25cf")
+        dot.setFont(QFont("Consolas", 8))
+        dot.setStyleSheet("color: #4CAF50;")
+        dot.setFixedWidth(12)
+
+        name_lbl = _label(device.name, _CLR_VALUE)
+        ip_lbl = _label(device.ip_address, "color: #607D8B;")
+
+        btn = QPushButton("Connect")
+        btn.setFixedSize(62, 20)
+        btn.setFont(QFont("Consolas", 8))
+        btn.setStyleSheet(
+            "background-color: #1565C0; color: white; border-radius: 2px; padding: 1px 4px;"
+        )
+        # Capture values for the lambda
+        dev_name = device.name
+        dev_ip = device.ip_address
+        btn.clicked.connect(lambda: self.connect_device_requested.emit(dev_name, dev_ip))
+
+        is_connected = device.name == self._connected_device
+        if is_connected:
+            btn.setText("Connected")
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "background-color: #2E7D32; color: white; border-radius: 2px; padding: 1px 4px;"
+            )
+
+        layout.addWidget(dot)
+        layout.addWidget(name_lbl)
+        layout.addWidget(ip_lbl)
+        layout.addStretch()
+        layout.addWidget(btn)
+
+        # Store refs for updating
+        row._dot = dot
+        row._name_lbl = name_lbl
+        row._ip_lbl = ip_lbl
+        row._btn = btn
+        row._dev_name = device.name
+        row._dev_ip = device.ip_address
+
+        return row
+
+    def _update_device_row(self, name: str, device, connected_device: str) -> None:
+        row = self._device_widgets.get(name)
+        if not row:
+            return
+        row._ip_lbl.setText(device.ip_address)
+        row._dev_ip = device.ip_address
+        is_connected = name == connected_device
+        if is_connected:
+            row._btn.setText("Connected")
+            row._btn.setEnabled(False)
+            row._btn.setStyleSheet(
+                "background-color: #2E7D32; color: white; border-radius: 2px; padding: 1px 4px;"
+            )
+        else:
+            row._btn.setText("Connect")
+            row._btn.setEnabled(True)
+            row._btn.setStyleSheet(
+                "background-color: #1565C0; color: white; border-radius: 2px; padding: 1px 4px;"
             )
 
     def reset(self) -> None:

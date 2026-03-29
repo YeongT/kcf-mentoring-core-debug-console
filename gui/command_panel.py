@@ -326,6 +326,8 @@ class CommandPanel(QGroupBox):
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
+        if not self._conn.connected:
+            return
         if self._scanning:
             self._btn_scan.setText("Stop Scan")
             self._btn_scan.setStyleSheet(_STYLE_SCAN_ON)
