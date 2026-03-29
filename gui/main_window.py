@@ -15,8 +15,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QMessageBox,
     QButtonGroup,
     QScrollArea,
@@ -365,8 +363,8 @@ class MainWindow(QMainWindow):
             (screen.height() - self.height()) // 2,
         )
 
-        # Open settings on first launch
-        QTimer.singleShot(0, self._show_settings_dialog)
+        # Update server label (auto-started from main.py)
+        QTimer.singleShot(0, self._update_server_label)
 
     # ================================================================
     #  Signals
@@ -712,128 +710,8 @@ class MainWindow(QMainWindow):
 
         form.addLayout(poll_row)
 
-        # --- Separator ---
-        sep = QLabel()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background-color: #333;")
-        form.addWidget(sep)
-
-        # --- Server section ---
-        form.addWidget(QLabel("<b>Server</b>"))
-        server_row = QHBoxLayout()
-        server_row.addWidget(QLabel("Port:"))
-        port_spin = QSpinBox()
-        port_spin.setRange(1024, 65535)
-        port_spin.setValue(self._server.port)
-        server_row.addWidget(port_spin)
-
-        btn_server = QPushButton()
-        if self._server.running:
-            btn_server.setText("Stop Server")
-            btn_server.setStyleSheet("background-color: #F44336; color: white;")
-        else:
-            btn_server.setText("Start Server")
-            btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
-
-        def set_running_ui() -> None:
-            try:
-                if btn_server.isVisible():
-                    btn_server.setText("Stop Server")
-                    btn_server.setStyleSheet("background-color: #F44336; color: white;")
-                    btn_server.setEnabled(True)
-                    port_spin.setEnabled(True)
-            except RuntimeError:
-                pass
-            self._update_server_label()
-            self._conn.log_message.emit(f"Server started on port {self._server.port}")
-
-        def set_stopped_ui(error: str = "") -> None:
-            try:
-                if btn_server.isVisible():
-                    btn_server.setText("Start Server")
-                    btn_server.setStyleSheet("background-color: #4CAF50; color: white;")
-                    btn_server.setEnabled(True)
-                    port_spin.setEnabled(True)
-            except RuntimeError:
-                pass
-            self._update_server_label()
-
-        self._server.server_started.connect(set_running_ui)
-        self._server.server_failed.connect(set_stopped_ui)
-
-        def _start_server() -> None:
-            self._server.port = port_spin.value()
-            self._save_settings()
-            btn_server.setEnabled(False)
-            port_spin.setEnabled(False)
-            btn_server.setText("Starting...")
-            self._server.start()
-
-        def _stop_server() -> None:
-            self._status_timer.stop()
-            self._uptime_timer.stop()
-            self._server.stop()
-            self._status_panel.set_disconnected()
-            set_stopped_ui()
-
-        def on_server_click() -> None:
-            if self._server.running:
-                _stop_server()
-            else:
-                _start_server()
-
-        def on_port_changed() -> None:
-            new_port = port_spin.value()
-            if new_port == self._server.port and self._server.running:
-                return
-            if self._server.running:
-                self._server.stop()
-            # Brief delay to let the old socket release
-            QTimer.singleShot(100, _start_server)
-
-        btn_server.clicked.connect(on_server_click)
-        dlg.enter_actions[port_spin] = on_port_changed
-        server_row.addWidget(btn_server)
-
-        btn_restart = QPushButton("Restart")
-        btn_restart.setStyleSheet("background-color: #1565C0; color: white;")
-        btn_restart.setEnabled(self._server.running)
-
-        def on_restart_click() -> None:
-            btn_restart.setEnabled(False)
-            btn_restart.setText("Restarting...")
-            self._restart_server()
-
-        btn_restart.clicked.connect(on_restart_click)
-        server_row.addWidget(btn_restart)
-
-        def update_restart_btn() -> None:
-            try:
-                if btn_restart.isVisible():
-                    btn_restart.setText("Restart")
-                    btn_restart.setEnabled(self._server.running)
-            except RuntimeError:
-                pass
-
-        self._server.server_started.connect(update_restart_btn)
-        self._server.server_stopped.connect(update_restart_btn)
-
-        form.addLayout(server_row)
-
         outer.addLayout(form)
         dlg.setLayout(outer)
-
-        def on_dialog_finished() -> None:
-            self._server.server_started.disconnect(set_running_ui)
-            self._server.server_failed.disconnect(set_stopped_ui)
-            try:
-                self._server.server_started.disconnect(update_restart_btn)
-                self._server.server_stopped.disconnect(update_restart_btn)
-            except (TypeError, RuntimeError):
-                pass
-
-        dlg.finished.connect(on_dialog_finished)
-        port_spin.setFocus()
         dlg.exec()
 
     # ================================================================
@@ -868,12 +746,6 @@ class MainWindow(QMainWindow):
 
     def _on_server_started(self) -> None:
         self._update_server_label()
-
-    def _restart_server(self) -> None:
-        self._status_timer.stop()
-        self._uptime_timer.stop()
-        self._status_panel.set_disconnected()
-        self._server.restart()
 
     def _update_server_label(self) -> None:
         if self._server.running:
