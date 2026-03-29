@@ -430,8 +430,21 @@ class MainWindow(QMainWindow):
     def _on_connect_device_requested(self, device_name: str, device_ip: str) -> None:
         """User clicked Connect on a discovered device."""
         if not self._server.running:
-            self._conn.log_message.emit("Cannot connect: server not running. Start the server first.")
+            self._conn.log_message.emit("Cannot connect: server not running.")
             return
+
+        # If already connected to this device, just switch to console
+        if self._conn.connected and self._conn.device_name == device_name:
+            self._stack.setCurrentIndex(1)
+            self._btn_devices.setVisible(True)
+            for btn in self._view_buttons.values():
+                btn.setVisible(True)
+            return
+
+        # Disconnect current device if connected to a different one
+        if self._conn.connected:
+            self._conn.log_message.emit(f"Disconnecting {self._conn.device_name} to switch device...")
+            self._conn.disconnect()
 
         server_ip = self._get_local_ip()
         server_port = self._server.port
