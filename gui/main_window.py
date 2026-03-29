@@ -127,11 +127,6 @@ class MainWindow(QMainWindow):
         self._btn_devices.setVisible(False)  # shown only on console page
         left_lay.addWidget(self._btn_devices)
 
-        self._server_label = QLabel("Server: OFF")
-        self._server_label.setFont(QFont("Consolas", 9))
-        self._server_label.setStyleSheet("color: #F44336;")
-        left_lay.addWidget(self._server_label)
-
         left_lay.addStretch()
         top_bar.addWidget(left_group, 1)
 
@@ -393,8 +388,6 @@ class MainWindow(QMainWindow):
         for btn in self._view_buttons.values():
             btn.setVisible(False)
 
-        # Update server label (auto-started from main.py)
-        QTimer.singleShot(0, self._update_server_label)
 
     # ================================================================
     #  Signals
@@ -784,22 +777,13 @@ class MainWindow(QMainWindow):
             btn.setVisible(False)
 
     def _on_server_stopped(self) -> None:
-        self._update_server_label()
         self._status_panel.set_disconnected()
         self._status_timer.stop()
         self._uptime_timer.stop()
         self._show_device_select()
 
     def _on_server_started(self) -> None:
-        self._update_server_label()
-
-    def _update_server_label(self) -> None:
-        if self._server.running:
-            self._server_label.setText(f"Server: ON (port {self._server.port})")
-            self._server_label.setStyleSheet("color: #4CAF50;")
-        else:
-            self._server_label.setText("Server: OFF")
-            self._server_label.setStyleSheet("color: #F44336;")
+        pass
 
     def _save_settings(self) -> None:
         self._settings["status_poll_interval"] = self._status_poll_interval
