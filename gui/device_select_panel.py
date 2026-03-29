@@ -30,6 +30,7 @@ _CARD_NORMAL = (
     "  border: 1px solid #333;"
     "  border-radius: 8px;"
     "}"
+    "QWidget#device_card * { background: transparent; }"
 )
 _CARD_CONNECTED = (
     "QWidget#device_card {"
@@ -37,6 +38,7 @@ _CARD_CONNECTED = (
     "  border: 1px solid #2E7D32;"
     "  border-radius: 8px;"
     "}"
+    "QWidget#device_card * { background: transparent; }"
 )
 
 
