@@ -15,6 +15,7 @@ from protocol import (
     PREFIX_STATUS,
     PREFIX_CAMERA,
     PREFIX_LIDAR,
+    DeviceStatus,
     InitAckSettings,
     parse_init,
     build_command,
@@ -302,8 +303,8 @@ class WebSocketServer(QObject):
                 parts.append(f"rpm={settings.motor_rpm}")
             conn.log_message.emit(f"INIT_ACK sent ({', '.join(parts)})")
 
-            # Build initial status bytes for the signal (prefix + 17B)
-            initial_status = bytes([PREFIX_STATUS]) + first_msg[3 + first_msg[2]:][:17]
+            # Build initial status bytes for the signal (prefix + DeviceStatus)
+            initial_status = bytes([PREFIX_STATUS]) + first_msg[3 + first_msg[2]:][:DeviceStatus.STRUCT_SIZE]
         else:
             initial_status = b""
 

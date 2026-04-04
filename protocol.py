@@ -163,35 +163,38 @@ SCAN_STATE_NAMES = {
 
 @dataclass
 class DeviceStatus:
-    """18-byte packed DeviceStatus struct (little-endian)."""
+    """22-byte packed DeviceStatus struct (little-endian)."""
 
     scan_state: int = 0
     lidar_rpm: int = 0
     sd_free_mb: int = 0
+    sd_total_mb: int = 0
     frame_count: int = 0
     scan_duration_ms: int = 0
     battery_pct: int = 0xFF
     camera_streaming: int = 0
     sensor_flags: int = 0  # bit0=LiDAR, bit1=IMU, bit2=Camera, bit3=SD
 
-    STRUCT_SIZE = 18
+    STRUCT_SIZE = 22
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
-        if len(data) < 17:
-            raise ValueError(f"DeviceStatus needs at least 17 bytes, got {len(data)}")
+        if len(data) < 21:
+            raise ValueError(f"DeviceStatus needs at least 21 bytes, got {len(data)}")
         scan_state = data[0]
         lidar_rpm = struct.unpack_from("<H", data, 1)[0]
         sd_free_mb = struct.unpack_from("<I", data, 3)[0]
-        frame_count = struct.unpack_from("<I", data, 7)[0]
-        scan_duration_ms = struct.unpack_from("<I", data, 11)[0]
-        battery_pct = data[15]
-        camera_streaming = data[16]
-        sensor_flags = data[17] if len(data) >= 18 else 0
+        sd_total_mb = struct.unpack_from("<I", data, 7)[0]
+        frame_count = struct.unpack_from("<I", data, 11)[0]
+        scan_duration_ms = struct.unpack_from("<I", data, 15)[0]
+        battery_pct = data[19]
+        camera_streaming = data[20]
+        sensor_flags = data[21] if len(data) >= 22 else 0
         return cls(
             scan_state=scan_state,
             lidar_rpm=lidar_rpm,
             sd_free_mb=sd_free_mb,
+            sd_total_mb=sd_total_mb,
             frame_count=frame_count,
             scan_duration_ms=scan_duration_ms,
             battery_pct=battery_pct,
@@ -237,6 +240,15 @@ class DeviceStatus:
     @property
     def sd_ok(self) -> bool:
         return bool(self.sensor_flags & 0x08)
+
+    @property
+    def sd_str(self) -> str:
+        if self.sd_total_mb == 0:
+            return "0 GB"
+        used_gb = (self.sd_total_mb - self.sd_free_mb) / 1024
+        total_gb = self.sd_total_mb / 1024
+        pct = (self.sd_total_mb - self.sd_free_mb) / self.sd_total_mb * 100
+        return f"{used_gb:.1f} / {total_gb:.1f} GB ({pct:.1f}%)"
 
 
 @dataclass
@@ -453,10 +465,10 @@ def parse_response(data: bytes) -> Optional[CommandResponse]:
 
 
 def parse_status(data: bytes) -> Optional[DeviceStatus]:
-    """Parse a STATUS message: [0x20] [DeviceStatus: 17B]"""
-    if len(data) < 18 or data[0] != PREFIX_STATUS:
+    """Parse a STATUS message: [0x20] [DeviceStatus: 22B]"""
+    if len(data) < 23 or data[0] != PREFIX_STATUS:
         return None
-    return DeviceStatus.from_bytes(data[1:18])
+    return DeviceStatus.from_bytes(data[1:23])
 
 
 def parse_camera_frame(data: bytes) -> Optional[bytes]:

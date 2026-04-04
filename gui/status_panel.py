@@ -291,7 +291,7 @@ class StatusPanel(QGroupBox):
 
         # Sensor values
         self._labels["lidar_val"].setText(f"{status.lidar_rpm} RPM")
-        self._labels["sd_val"].setText(f"{status.sd_free_mb} MB")
+        self._labels["sd_val"].setText(status.sd_str)
 
         streaming_text = status.streaming_str
         self._labels["camera_val"].setText(streaming_text)
