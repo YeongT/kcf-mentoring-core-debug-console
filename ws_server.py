@@ -15,6 +15,8 @@ from protocol import (
     PREFIX_STATUS,
     PREFIX_CAMERA,
     PREFIX_LIDAR,
+    PREFIX_IMU,
+    PREFIX_SD_CHUNK,
     DeviceStatus,
     InitAckSettings,
     parse_init,
@@ -32,6 +34,8 @@ class DeviceConnection(QObject):
     status_received = pyqtSignal(bytes)  # raw STATUS message (18B)
     camera_frame_received = pyqtSignal(bytes)  # raw CAMERA message
     lidar_frame_received = pyqtSignal(bytes)  # raw LIDAR message
+    imu_frame_received = pyqtSignal(bytes)  # raw IMU message
+    sd_chunk_received = pyqtSignal(bytes)  # raw SD file chunk
     raw_message_received = pyqtSignal(str, bytes)  # direction("RX"/"TX"), raw data
     log_message = pyqtSignal(str)  # text log
 
@@ -292,7 +296,7 @@ class WebSocketServer(QObject):
                 await ws.send(ack_data)
             except Exception as e:
                 conn.log_message.emit(f"Failed to send INIT_ACK: {e}")
-                conn._clear_connection()
+                conn._clear_connection(conn_id)
                 return
 
             settings = conn.init_ack_settings
@@ -325,6 +329,10 @@ class WebSocketServer(QObject):
                             conn.camera_frame_received.emit(message)
                         elif prefix == PREFIX_LIDAR:
                             conn.lidar_frame_received.emit(message)
+                        elif prefix == PREFIX_IMU:
+                            conn.imu_frame_received.emit(message)
+                        elif prefix == PREFIX_SD_CHUNK:
+                            conn.sd_chunk_received.emit(message)
                     elif isinstance(message, str):
                         conn.log_message.emit(f"TEXT: {message}")
                 except Exception as e:

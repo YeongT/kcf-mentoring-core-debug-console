@@ -1,48 +1,46 @@
-"""Main window layout assembling all panels."""
+"""Main window with sensor-specific tabs for the debug console."""
+
+from __future__ import annotations
 
 import os
 import socket
 import tempfile
 import time
 
+from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPixmap, QPolygon, QShortcut
 from PyQt6.QtWidgets import (
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
+    QDialog,
     QHBoxLayout,
     QLabel,
-    QSplitter,
-    QPushButton,
-    QSpinBox,
-    QDialog,
+    QMainWindow,
     QMessageBox,
-    QButtonGroup,
+    QPushButton,
     QScrollArea,
+    QSplitter,
+    QSpinBox,
     QStackedWidget,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence, QPixmap, QPainter, QColor, QPolygon
 
-from protocol import (
-    parse_status,
-    parse_camera_frame,
-    parse_lidar_frame,
-    parse_response,
-    DeviceStatus,
-    CMD_GET_STATUS,
-    CMD_SET_CAMERA_CONFIG,
-    CMD_CAMERA_SET_PARAM,
-)
-from ws_server import DeviceConnection, WebSocketServer
-from udp_discovery import UdpDiscoveryListener
 import settings
+from protocol import CMD_GET_STATUS, DeviceStatus, parse_camera_frame, parse_imu_frame, parse_lidar_frame, parse_response, parse_status
+from udp_discovery import UdpDiscoveryListener
+from ws_server import DeviceConnection, WebSocketServer
 
 from gui.camera_panel import CameraPanel
-from gui.lidar_panel import LidarPanel
-from gui.status_panel import StatusPanel
 from gui.command_panel import CommandPanel
-from gui.log_panel import LogPanel
+from gui.control_panels import CameraControlPanel, ImuControlPanel, LidarControlPanel, MappingControlPanel
 from gui.device_select_panel import DeviceSelectPanel
+from gui.imu_panel import ImuPanel
+from gui.lidar3d_panel import Lidar3DPanel
+from gui.lidar_panel import LidarPanel
+from gui.log_panel import LogPanel
+from gui.prototype_simulator import PrototypeSimulator
+from gui.sd_card_panel import SdCardPanel
+from gui.status_panel import StatusPanel
 
 
 class MainWindow(QMainWindow):
@@ -51,26 +49,28 @@ class MainWindow(QMainWindow):
         self._conn = connection
         self._server = server
         self._discovery = discovery
-        self.setWindowTitle("Core Device Test Client")
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setMinimumSize(1200, 920)
-
         self._settings = settings.load()
         self._status_poll_interval = self._settings.get("status_poll_interval", 5000)
+        self._connected_at = 0.0
+        self._total_bytes = 0
+        self._drag_pos: QPoint | None = None
+        self._resize_edge = ""
+        self._EDGE_MARGIN = 6
+
+        self.setWindowTitle("Core Device Debug Console")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setMinimumSize(1320, 940)
+
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
-
-        # Uptime / data tracking
-        self._connected_at: float = 0
-        self._total_bytes: int = 0
         self._uptime_timer = QTimer(self)
         self._uptime_timer.setInterval(1000)
         self._uptime_timer.timeout.connect(self._tick_uptime)
 
-        # For frameless window dragging / resizing
-        self._drag_pos: QPoint | None = None
-        self._resize_edge: str = ""  # "", "left", "right", "top", "bottom", combos
-        self._EDGE_MARGIN = 6
+        self._tab_indices: dict[str, int] = {}
+        self._current_status = DeviceStatus()
+        self._demo_mode = False
+        self._simulator = PrototypeSimulator(self)
 
         self._create_arrow_icons()
         self._init_ui()
@@ -87,11 +87,11 @@ class MainWindow(QMainWindow):
         for name, points in arrows.items():
             pix = QPixmap(9, 5)
             pix.fill(QColor(0, 0, 0, 0))
-            p = QPainter(pix)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(color)
-            p.drawPolygon(QPolygon(points))
-            p.end()
+            painter = QPainter(pix)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawPolygon(QPolygon(points))
+            painter.end()
             path = os.path.join(icon_dir, f"{name}.png")
             pix.save(path)
             setattr(self, f"_arrow_{name}", path.replace("\\", "/"))
@@ -99,495 +99,494 @@ class MainWindow(QMainWindow):
     def _init_ui(self) -> None:
         central = QWidget()
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(6)
+        main_layout.setSpacing(8)
         main_layout.setContentsMargins(8, 8, 8, 8)
 
-        # ============================================================
-        #  Top bar: [server + settings]  [view modes centered]  [quit]
-        # ============================================================
         top_bar = QHBoxLayout()
         top_bar.setSpacing(6)
 
-        # -- Left group --
-        left_group = QWidget()
-        left_lay = QHBoxLayout(left_group)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(6)
-
         self._btn_settings = QPushButton("\u2699")
         self._btn_settings.setStyleSheet("padding: 4px 10px; font-size: 16px;")
-        self._btn_settings.setToolTip("Settings")
         self._btn_settings.clicked.connect(self._show_settings_dialog)
-        left_lay.addWidget(self._btn_settings)
+        top_bar.addWidget(self._btn_settings)
 
         self._btn_devices = QPushButton("\u25c0 Devices")
         self._btn_devices.setStyleSheet("padding: 4px 10px; font-size: 11px; color: #90CAF9;")
-        self._btn_devices.setToolTip("Back to device selection")
         self._btn_devices.clicked.connect(self._show_device_select)
-        self._btn_devices.setVisible(False)  # shown only on console page
-        left_lay.addWidget(self._btn_devices)
+        self._btn_devices.setVisible(False)
+        top_bar.addWidget(self._btn_devices)
 
-        left_lay.addStretch()
-        top_bar.addWidget(left_group, 1)
-
-        # -- Center: view mode selector --
-        self._view_mode = "split"
-        self._view_group = QButtonGroup(self)
-        self._view_group.setExclusive(True)
-        view_modes = [
-            ("split", "Split View", "1"),
-            ("camera", "Camera", "2"),
-            ("lidar", "LiDAR", "3"),
-        ]
-        self._view_buttons: dict[str, QPushButton] = {}
-        for mode, label, shortcut_key in view_modes:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setFont(QFont("Consolas", 9))
-            btn.clicked.connect(lambda _, m=mode: self._set_view_mode(m))
-            self._view_group.addButton(btn)
-            self._view_buttons[mode] = btn
-            top_bar.addWidget(btn)
-            sc = QShortcut(QKeySequence(f"Ctrl+{shortcut_key}"), self)
-            sc.activated.connect(lambda m=mode: self._set_view_mode(m))
-        self._view_buttons["split"].setChecked(True)
-
-        # -- Right group --
-        right_group = QWidget()
-        right_lay = QHBoxLayout(right_group)
-        right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(6)
-        right_lay.addStretch()
+        self._title = QLabel("Sensor Debug Console")
+        self._title.setFont(QFont("Consolas", 11))
+        self._title.setStyleSheet("color: #CFD8DC;")
+        top_bar.addWidget(self._title)
+        top_bar.addStretch()
 
         btn_quit = QPushButton("\u2715")
         btn_quit.setStyleSheet("padding: 4px 10px; font-size: 14px; color: #888;")
-        btn_quit.setToolTip("Quit")
         btn_quit.clicked.connect(self.close)
-        right_lay.addWidget(btn_quit)
-
-        top_bar.addWidget(right_group, 1)
-
+        top_bar.addWidget(btn_quit)
         main_layout.addLayout(top_bar)
 
-        # ============================================================
-        #  Stacked widget: page 0 = device select, page 1 = console
-        # ============================================================
         self._stack = QStackedWidget()
-
-        # --- Page 0: Device Selection ---
         self._device_select = DeviceSelectPanel()
-        self._stack.addWidget(self._device_select)  # index 0
+        self._stack.addWidget(self._device_select)
 
-        # --- Page 1: Console ---
         console_page = QWidget()
         console_layout = QVBoxLayout()
-        console_layout.setSpacing(6)
+        console_layout.setSpacing(8)
         console_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Shared panels
-        self._camera_panel = CameraPanel()
-        self._lidar_panel = LidarPanel()
         self._status_panel = StatusPanel()
-        self._command_panel = CommandPanel(self._conn)
-        self._command_panel.setMinimumWidth(280)
-
-        # Visualization: horizontal splitter (camera + lidar)
-        self._h_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._viz_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._viz_splitter.addWidget(self._camera_panel)
-        self._viz_splitter.addWidget(self._lidar_panel)
-        self._viz_splitter.setStretchFactor(0, 5)
-        self._viz_splitter.setStretchFactor(1, 4)
-        self._h_splitter.addWidget(self._viz_splitter)
-
-        # Right sidebar (single-view modes) — scrollable
-        self._right_scroll = QScrollArea()
-        self._right_scroll.setWidgetResizable(True)
-        self._right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._right_scroll.setStyleSheet("""
-            QScrollArea { background: transparent; }
-            QScrollBar:vertical {
-                background: transparent; width: 6px; margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #444; border-radius: 3px; min-height: 20px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-        """)
-        self._right_inner = QWidget()
-        self._right_layout = QVBoxLayout()
-        self._right_layout.setContentsMargins(6, 4, 2, 4)
-        self._right_layout.setSpacing(10)
-        self._right_inner.setLayout(self._right_layout)
-        self._right_scroll.setWidget(self._right_inner)
-        self._right_scroll.setMinimumWidth(300)
-        self._right_scroll.setMaximumWidth(380)
-        self._h_splitter.addWidget(self._right_scroll)
-        self._h_splitter.setStretchFactor(0, 7)
-        self._h_splitter.setStretchFactor(1, 3)
-
-        console_layout.addWidget(self._h_splitter, 1)
-
-        # Bottom controls (split-view mode)
-        self._bottom_widget = QWidget()
-        self._bottom_layout = QHBoxLayout()
-        self._bottom_layout.setContentsMargins(0, 4, 0, 0)
-        self._bottom_layout.setSpacing(8)
-        self._bottom_widget.setLayout(self._bottom_layout)
-        self._bottom_widget.setMaximumHeight(280)
-        console_layout.addWidget(self._bottom_widget)
-
-        # Log panel
+        self._dashboard_camera_panel = CameraPanel()
+        self._dashboard_lidar_panel = LidarPanel()
+        self._dashboard_status_panel = StatusPanel()
+        self._dashboard_command_panel = CommandPanel(self._conn)
+        self._dashboard_command_panel.setMinimumWidth(280)
+        self._camera_panel = CameraPanel()
+        self._camera_controls = CameraControlPanel(self._conn)
+        self._lidar_panel = LidarPanel()
+        self._lidar_controls = LidarControlPanel(self._conn)
+        self._imu_panel = ImuPanel()
+        self._imu_controls = ImuControlPanel(self._conn, self._imu_panel)
+        self._lidar3d_panel = Lidar3DPanel()
+        self._map_controls = MappingControlPanel(self._lidar3d_panel, self._toggle_demo)
+        self._sd_panel = SdCardPanel(self._conn)
         self._log_panel = LogPanel()
-        console_layout.addWidget(self._log_panel, 0)
 
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+
+        dashboard_tab = QWidget()
+        dashboard_layout = QVBoxLayout()
+        dashboard_layout.setSpacing(8)
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+
+        dashboard_splitter = QSplitter(Qt.Orientation.Horizontal)
+        dashboard_splitter.addWidget(self._dashboard_camera_panel)
+        dashboard_splitter.addWidget(self._dashboard_lidar_panel)
+        dashboard_splitter.setStretchFactor(0, 5)
+        dashboard_splitter.setStretchFactor(1, 4)
+        dashboard_layout.addWidget(dashboard_splitter, 1)
+
+        dashboard_bottom = QWidget()
+        dashboard_bottom_layout = QHBoxLayout()
+        dashboard_bottom_layout.setContentsMargins(0, 0, 0, 0)
+        dashboard_bottom_layout.setSpacing(8)
+        dashboard_bottom_layout.addWidget(self._dashboard_status_panel, 5)
+        dashboard_bottom_layout.addWidget(self._dashboard_command_panel, 5)
+        dashboard_bottom.setLayout(dashboard_bottom_layout)
+        dashboard_bottom.setMaximumHeight(300)
+        dashboard_layout.addWidget(dashboard_bottom, 0)
+
+        dashboard_tab.setLayout(dashboard_layout)
+        self._tab_indices["dashboard"] = self._tabs.addTab(dashboard_tab, "Dashboard")
+
+        camera_tab = QWidget()
+        camera_layout = QHBoxLayout()
+        camera_layout.setSpacing(8)
+        camera_layout.setContentsMargins(0, 0, 0, 0)
+        camera_layout.addWidget(self._camera_panel, 7)
+        camera_layout.addWidget(self._camera_controls, 4)
+        camera_tab.setLayout(camera_layout)
+        self._tab_indices["camera"] = self._tabs.addTab(camera_tab, "Camera")
+
+        lidar_tab = QWidget()
+        lidar_layout = QHBoxLayout()
+        lidar_layout.setSpacing(8)
+        lidar_layout.setContentsMargins(0, 0, 0, 0)
+        lidar_layout.addWidget(self._lidar_panel, 7)
+        lidar_layout.addWidget(self._lidar_controls, 4)
+        lidar_tab.setLayout(lidar_layout)
+        self._tab_indices["lidar2d"] = self._tabs.addTab(lidar_tab, "LiDAR (2D)")
+
+        imu_tab = QWidget()
+        imu_layout = QHBoxLayout()
+        imu_layout.setSpacing(8)
+        imu_layout.setContentsMargins(0, 0, 0, 0)
+        imu_layout.addWidget(self._imu_panel, 7)
+        imu_layout.addWidget(self._imu_controls, 3)
+        imu_tab.setLayout(imu_layout)
+        self._tab_indices["imu"] = self._tabs.addTab(imu_tab, "IMU")
+
+        lidar3d_tab = QWidget()
+        lidar3d_layout = QHBoxLayout()
+        lidar3d_layout.setSpacing(8)
+        lidar3d_layout.setContentsMargins(0, 0, 0, 0)
+        lidar3d_layout.addWidget(self._lidar3d_panel, 7)
+        lidar3d_layout.addWidget(self._map_controls, 3)
+        lidar3d_tab.setLayout(lidar3d_layout)
+        self._tab_indices["lidar3d"] = self._tabs.addTab(lidar3d_tab, "LiDAR (3D)")
+        self._tab_indices["sd"] = self._tabs.addTab(self._sd_panel, "SD Viewer")
+
+        self._console_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._console_splitter.addWidget(self._tabs)
+        self._console_splitter.addWidget(self._log_panel)
+        self._console_splitter.setStretchFactor(0, 5)
+        self._console_splitter.setStretchFactor(1, 1)
+        console_layout.addWidget(self._console_splitter, 1)
         console_page.setLayout(console_layout)
-        self._stack.addWidget(console_page)  # index 1
+        self._stack.addWidget(console_page)
 
-        main_layout.addWidget(self._stack, 1)
-
-        # Start on device selection page
         self._stack.setCurrentIndex(0)
+        main_layout.addWidget(self._stack, 1)
 
         central.setLayout(main_layout)
         self.setCentralWidget(central)
+        self._apply_styles()
+        self._update_sensor_tabs(None)
+        self._console_splitter.setSizes([760, 150])
 
-        # ============================================================
-        #  Dark theme
-        # ============================================================
+        screen = self.screen().availableGeometry()
+        self.move((screen.width() - self.width()) // 2, (screen.height() - self.height()) // 2)
+
+        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["dashboard"]))
+        QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["camera"]))
+        QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["lidar2d"]))
+        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["imu"]))
+        QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["lidar3d"]))
+        QShortcut(QKeySequence("Ctrl+6"), self, activated=lambda: self._tabs.setCurrentIndex(self._tab_indices["sd"]))
+
+    def _apply_styles(self) -> None:
         stylesheet = """
             QMainWindow {
-                background-color: #121212;
+                background-color: #101418;
                 color: #E0E0E0;
-                border: 1px solid #444;
+                border: 1px solid #28313A;
                 border-radius: 6px;
             }
             QWidget {
-                background-color: #121212;
+                background-color: #101418;
                 color: #E0E0E0;
             }
             QDialog, QMessageBox {
-                border: 1px solid #555;
-                border-radius: 6px;
+                background-color: #121920;
+                border: 1px solid #33414F;
+                border-radius: 8px;
                 padding: 8px;
             }
             QGroupBox {
-                border: 1px solid #333;
-                border-radius: 4px;
+                background-color: #121920;
+                border: 1px solid #24303B;
+                border-radius: 10px;
                 margin-top: 12px;
-                padding-top: 8px;
+                padding-top: 10px;
                 font-weight: bold;
-                color: #B0BEC5;
+                color: #C7D2DC;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
+                left: 12px;
+                padding: 0 6px;
             }
             QPushButton {
-                background-color: #333;
-                color: #E0E0E0;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 6px 16px;
+                background-color: #1D2731;
+                color: #E5EDF3;
+                border: 1px solid #34414D;
+                border-radius: 7px;
+                padding: 7px 16px;
                 font-size: 12px;
             }
-            QPushButton:hover {
-                background-color: #444;
-            }
-            QPushButton:pressed {
-                background-color: #555;
-            }
+            QPushButton:hover { background-color: #24313D; border-color: #47627C; }
+            QPushButton:pressed { background-color: #2A3946; }
             QPushButton:disabled {
-                background-color: #1a1a1a;
-                color: #3a3a3a;
-                border-color: #2a2a2a;
+                background-color: #151B20;
+                color: #41505B;
+                border-color: #202830;
             }
-            QSpinBox {
-                background-color: #1a1a1a;
+            QSpinBox, QComboBox, QTreeWidget {
+                background-color: #0D1318;
                 color: #E0E0E0;
-                border: 1px solid #444;
-                border-radius: 3px;
-                padding: 2px;
-                padding-right: 18px;
+                border: 1px solid #34414D;
+                border-radius: 7px;
+                padding: 4px 6px;
             }
-            QSpinBox::up-button {
-                subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 16px;
-                border-left: 1px solid #444;
-                background-color: #2a2a2a;
-                border-top-right-radius: 3px;
-            }
-            QSpinBox::up-button:hover { background-color: #3a3a3a; }
-            QSpinBox::up-button:pressed { background-color: #555; }
-            QSpinBox::down-button {
-                subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 16px;
-                border-left: 1px solid #444;
-                background-color: #2a2a2a;
-                border-bottom-right-radius: 3px;
-            }
-            QSpinBox::down-button:hover { background-color: #3a3a3a; }
-            QSpinBox::down-button:pressed { background-color: #555; }
-            QSpinBox::up-arrow {
-                image: url(ARROW_UP_PATH);
-                width: 9px; height: 5px;
-            }
-            QSpinBox::down-arrow {
-                image: url(ARROW_DN_PATH);
-                width: 9px; height: 5px;
-            }
-            QTextEdit {
-                background-color: #0a0a0a;
-                color: #E0E0E0;
-                border: 1px solid #333;
-            }
-            QLabel {
-                color: #B0BEC5;
-            }
-            QCheckBox {
-                color: #B0BEC5;
-                spacing: 4px;
-            }
+            QSpinBox::up-arrow { image: url(ARROW_UP_PATH); width: 9px; height: 5px; }
+            QSpinBox::down-arrow { image: url(ARROW_DN_PATH); width: 9px; height: 5px; }
+            QTextEdit { background-color: #091016; color: #E0E0E0; border: 1px solid #24303B; border-radius: 8px; }
+            QLabel { color: #B0BEC5; }
+            QCheckBox { color: #B0BEC5; spacing: 4px; }
             QCheckBox::indicator {
                 width: 14px;
                 height: 14px;
-                border: 1px solid #555;
+                border: 1px solid #455463;
                 border-radius: 3px;
-                background-color: #1a1a1a;
+                background-color: #0D1318;
             }
             QCheckBox::indicator:checked {
-                background-color: #1565C0;
-                border-color: #1976D2;
+                background-color: #2B6CB0;
+                border-color: #58A6FF;
             }
-            QCheckBox::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #2a2a2a;
+            QTabWidget::pane {
+                background: #0F151B;
+                border: 1px solid #24303B;
+                border-radius: 12px;
+                padding: 10px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #121A21;
+                border: 1px solid #24303B;
+                border-bottom: none;
+                padding: 9px 18px;
+                margin-right: 6px;
+                border-top-left-radius: 9px;
+                border-top-right-radius: 9px;
+                color: #7D93A8;
+            }
+            QTabBar::tab:selected {
+                background: #1B2731;
+                color: #E8F3FF;
+                border-color: #3B5268;
+            }
+            QTabBar::tab:disabled {
+                color: #465563;
+                background: #0E1318;
+            }
+            QSplitter::handle {
+                background-color: #16202A;
+            }
+            QSplitter::handle:vertical {
+                height: 6px;
+            }
+            QSplitter::handle:horizontal {
+                width: 6px;
+            }
+            QHeaderView::section {
+                background-color: #16202A;
+                color: #A9B8C6;
+                border: none;
+                border-right: 1px solid #24303B;
+                padding: 6px 8px;
             }
         """
-        stylesheet = stylesheet.replace("ARROW_UP_PATH", self._arrow_up)
-        stylesheet = stylesheet.replace("ARROW_DN_PATH", self._arrow_dn)
-        self.setStyleSheet(stylesheet)
-
-        # Apply initial view mode
-        self._set_view_mode("split")
-
-        # Center on screen
-        screen = self.screen().availableGeometry()
-        self.move(
-            (screen.width() - self.width()) // 2,
-            (screen.height() - self.height()) // 2,
-        )
-
-        # Hide view mode buttons until connected
-        for btn in self._view_buttons.values():
-            btn.setVisible(False)
-
-
-    # ================================================================
-    #  Signals
-    # ================================================================
+        self.setStyleSheet(stylesheet.replace("ARROW_UP_PATH", self._arrow_up).replace("ARROW_DN_PATH", self._arrow_dn))
 
     def _connect_signals(self) -> None:
-        conn = self._conn
-        conn.device_connected.connect(self._on_connected)
-        conn.device_disconnected.connect(self._on_disconnected)
-        conn.status_received.connect(self._on_status)
-        conn.camera_frame_received.connect(self._on_camera_frame)
-        conn.lidar_frame_received.connect(self._on_lidar_frame)
-        conn.response_received.connect(self._on_response)
-        conn.raw_message_received.connect(self._log_panel.log_raw)
-        conn.raw_message_received.connect(self._on_raw_data)
-        conn.log_message.connect(self._log_panel.log_text)
-        self._command_panel.reset_requested.connect(self._on_reset)
+        self._conn.device_connected.connect(self._on_connected)
+        self._conn.device_disconnected.connect(self._on_disconnected)
+        self._conn.status_received.connect(self._on_status)
+        self._conn.camera_frame_received.connect(self._on_camera_frame)
+        self._conn.lidar_frame_received.connect(self._on_lidar_frame)
+        self._conn.imu_frame_received.connect(self._on_imu_frame)
+        self._conn.response_received.connect(self._on_response)
+        self._conn.raw_message_received.connect(self._log_panel.log_raw)
+        self._conn.raw_message_received.connect(self._on_raw_data)
+        self._conn.log_message.connect(self._log_panel.log_text)
+        self._simulator.frame_ready.connect(self._on_demo_frame)
+        self._simulator.started.connect(self._on_demo_started)
+        self._simulator.stopped.connect(self._on_demo_stopped)
+        self._dashboard_command_panel.reset_requested.connect(self._on_reset)
         self._device_select.connect_requested.connect(self._on_connect_device_requested)
         self._server.server_stopped.connect(self._on_server_stopped)
 
-        # UDP Discovery callback (runs in background thread, use QTimer to cross to GUI thread)
         if self._discovery:
             self._discovery_timer = QTimer(self)
             self._discovery_timer.setInterval(1500)
             self._discovery_timer.timeout.connect(self._poll_discovery)
             self._discovery_timer.start()
 
-    # ================================================================
-    #  Connection events
-    # ================================================================
-
     def _poll_discovery(self) -> None:
-        """Periodically read discovered devices from the listener (thread-safe via QTimer)."""
         if self._discovery:
             devices = self._discovery.devices
             connected = self._conn.device_name if self._conn.connected else ""
             self._device_select.update_devices(devices, connected)
 
     def _on_connect_device_requested(self, device_name: str, device_ip: str) -> None:
-        """User clicked Connect on a discovered device."""
         if not self._server.running:
             self._conn.log_message.emit("Cannot connect: server not running.")
             return
-
-        # If already connected to this device, just switch to console
         if self._conn.connected and self._conn.device_name == device_name:
             self._stack.setCurrentIndex(1)
             self._btn_devices.setVisible(True)
-            for btn in self._view_buttons.values():
-                btn.setVisible(True)
             return
-
-        # Disconnect current device if connected to a different one
         if self._conn.connected:
             self._conn.log_message.emit(f"Disconnecting {self._conn.device_name} to switch device...")
             self._conn.disconnect()
 
         server_ip = self._get_local_ip()
-        server_port = self._server.port
-
-        self._conn.log_message.emit(
-            f"Sending CONNECT to {device_name} @ {device_ip} -> {server_ip}:{server_port}"
-        )
-
-        if self._discovery:
-            if not self._discovery.send_connect(device_ip, server_ip, server_port):
-                self._conn.log_message.emit("Failed to send CONNECT packet")
+        self._conn.log_message.emit(f"Sending CONNECT to {device_name} @ {device_ip} -> {server_ip}:{self._server.port}")
+        if self._discovery and not self._discovery.send_connect(device_ip, server_ip, self._server.port):
+            self._conn.log_message.emit("Failed to send CONNECT packet")
 
     @staticmethod
     def _get_local_ip() -> str:
-        """Get this machine's LAN IP address."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                return sock.getsockname()[0]
         except OSError:
             return "127.0.0.1"
 
     def _on_connected(self, device_name: str, initial_status: bytes) -> None:
+        if self._demo_mode:
+            self._stop_demo()
         self._status_panel.set_connected(device_name)
+        self._dashboard_status_panel.set_connected(device_name)
+        self._imu_panel.set_online(False, "Connected. Waiting for first IMU preview batch.")
+        self._map_controls.set_sensor_state(False, False)
         self._connected_at = time.monotonic()
         self._total_bytes = 0
         self._uptime_timer.start()
         self._restart_status_timer()
-        # Switch to console page
         self._stack.setCurrentIndex(1)
         self._btn_devices.setVisible(True)
-        for btn in self._view_buttons.values():
-            btn.setVisible(True)
-        # Apply initial status from INIT handshake if available
         if initial_status:
             self._on_status(initial_status)
-        # Request fresh status after connection to get accurate sensor flags
         QTimer.singleShot(500, self._poll_status)
 
     def _on_disconnected(self) -> None:
+        if self._demo_mode:
+            return
         self._status_panel.set_disconnected()
+        self._dashboard_status_panel.set_disconnected()
         self._uptime_timer.stop()
         self._status_timer.stop()
+        self._dashboard_camera_panel.reset()
+        self._dashboard_lidar_panel.reset()
+        self._camera_panel.reset()
         self._lidar_panel.reset()
-        # Switch back to device selection
+        self._imu_panel.reset()
+        self._lidar3d_panel.reset()
+        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
+        self._map_controls.set_sensor_state(False, False)
+        self._sd_panel.reset()
+        self._update_sensor_tabs(None)
         self._show_device_select()
 
-    def _on_raw_data(self, _direction: str, data: bytes) -> None:
+    def _on_raw_data(self, direction: str, data: bytes) -> None:
         self._total_bytes += len(data)
         self._status_panel.update_data_total(self._total_bytes)
-        if _direction == "RX":
+        self._dashboard_status_panel.update_data_total(self._total_bytes)
+        if direction == "RX":
             self._status_panel.update_last_rx()
+            self._dashboard_status_panel.update_last_rx()
 
     def _tick_uptime(self) -> None:
         if self._connected_at > 0:
             elapsed = int(time.monotonic() - self._connected_at)
             self._status_panel.update_uptime(elapsed)
-
-    # ================================================================
-    #  Data events
-    # ================================================================
+            self._dashboard_status_panel.update_uptime(elapsed)
 
     def _on_status(self, data: bytes) -> None:
         status = parse_status(data)
-        if status:
-            self._status_panel.update_status(status)
+        if not status:
+            return
+        self._current_status = status
+        self._status_panel.update_status(status)
+        self._dashboard_status_panel.update_status(status)
+        self._imu_panel.set_online(status.imu_ok, "IMU connected. Waiting for live preview..." if status.imu_ok else "IMU sensor offline")
+        self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
+        self._update_sensor_tabs(status)
+        self._sync_tab_meta(status)
 
     def _on_camera_frame(self, data: bytes) -> None:
         jpeg = parse_camera_frame(data)
         if jpeg:
+            self._dashboard_camera_panel.update_frame(jpeg)
             self._camera_panel.update_frame(jpeg)
 
     def _on_lidar_frame(self, data: bytes) -> None:
         frame = parse_lidar_frame(data)
         if frame:
+            self._dashboard_lidar_panel.update_frame(frame)
             self._lidar_panel.update_frame(frame)
+            self._lidar3d_panel.update_lidar_frame(frame)
+            self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
+
+    def _on_imu_frame(self, data: bytes) -> None:
+        frame = parse_imu_frame(data)
+        if frame:
+            self._imu_panel.update_frame(frame)
+            snapshot = self._imu_panel.get_snapshot()
+            _roll, _pitch, yaw = self._imu_panel.get_orientation_deg()
+            self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
+            self._lidar3d_panel.set_orientation(yaw)
+            self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)
         if not resp:
             return
-        # Status response updates the status panel
-        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= 17:
+        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= DeviceStatus.STRUCT_SIZE:
             status = DeviceStatus.from_bytes(resp.payload)
+            self._current_status = status
             self._status_panel.update_status(status)
-        # Clear camera preview on config/param change
-        elif resp.cmd_id in (CMD_SET_CAMERA_CONFIG, CMD_CAMERA_SET_PARAM) and resp.ok:
-            self._camera_panel.reset()
+            self._dashboard_status_panel.update_status(status)
+            self._imu_panel.set_online(status.imu_ok, "IMU connected. Waiting for live preview..." if status.imu_ok else "IMU sensor offline")
+            self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
+            self._update_sensor_tabs(status)
+            self._sync_tab_meta(status)
 
-    # ================================================================
-    #  View mode switching
-    # ================================================================
-
-    _VIEW_BTN_BASE = "padding: 4px 14px; font-size: 11px; border-radius: 3px;"
-    _VIEW_BTN_OFF = _VIEW_BTN_BASE + "background-color: #1a1a1a; color: #666; border: 1px solid #333;"
-    _VIEW_BTN_ON = _VIEW_BTN_BASE + "background-color: #1565C0; color: white; border: 1px solid #1976D2;"
-
-    def _set_view_mode(self, mode: str) -> None:
-        self._view_mode = mode
-        self._view_buttons[mode].setChecked(True)
-        for m, btn in self._view_buttons.items():
-            btn.setStyleSheet(self._VIEW_BTN_ON if m == mode else self._VIEW_BTN_OFF)
-
-        # Suppress repaints during reparenting to avoid white flash
-        self.setUpdatesEnabled(False)
-
-        self._camera_panel.setVisible(mode in ("split", "camera"))
-        self._lidar_panel.setVisible(mode in ("split", "lidar"))
-
-        if mode == "split":
-            # Full-width viz, controls at bottom
-            self._right_scroll.hide()
-            self._status_panel.setMaximumWidth(16777215)
-            self._command_panel.set_sidebar_mode(False, "split")
-            self._bottom_layout.addWidget(self._status_panel, 5)
-            self._bottom_layout.addWidget(self._command_panel, 5)
-            self._bottom_widget.show()
+    def _update_sensor_tabs(self, status: DeviceStatus | None) -> None:
+        if self._demo_mode:
+            states = {
+                "dashboard": True,
+                "camera": False,
+                "lidar2d": True,
+                "imu": True,
+                "lidar3d": True,
+                "sd": False,
+            }
         else:
-            # Single viz + right sidebar
-            self._bottom_widget.hide()
-            self._status_panel.setMaximumWidth(16777215)  # reset max
-            self._command_panel.set_sidebar_mode(True, mode)
-            self._right_layout.addWidget(self._status_panel)
-            self._right_layout.addWidget(self._command_panel, 1)
-            self._right_scroll.show()
+            states = {
+                "dashboard": True,
+                "camera": bool(status and status.camera_ok),
+                "lidar2d": bool(status and status.lidar_ok),
+                "imu": bool(status and status.imu_ok),
+                "lidar3d": bool(status and status.lidar_ok and status.imu_ok),
+                "sd": bool(status and status.sd_ok),
+            }
+        for key, tab_index in self._tab_indices.items():
+            self._tabs.setTabEnabled(tab_index, states[key])
+        if not states.get("camera"):
+            self._camera_panel.reset()
+        if not states.get("lidar2d"):
+            self._lidar_panel.reset()
+        if not states.get("imu"):
+            self._imu_panel.reset()
+        if not states.get("lidar3d"):
+            self._lidar3d_panel.reset()
+        if not states.get("sd"):
+            self._sd_panel.reset()
+        current_enabled = self._tabs.isTabEnabled(self._tabs.currentIndex())
+        if not current_enabled:
+            self._tabs.setCurrentIndex(self._tab_indices["dashboard"])
 
-        self.setUpdatesEnabled(True)
-
-    # ================================================================
-    #  Frameless window dragging
-    # ================================================================
+    def _sync_tab_meta(self, status: DeviceStatus | None) -> None:
+        meta = {
+            "dashboard": ("Dashboard", "Overall overview and quick controls"),
+            "camera": ("Camera", "Enabled only when camera is healthy"),
+            "lidar2d": ("LiDAR (2D)", "Raw planar scan validation"),
+            "imu": ("IMU", "Orientation, acceleration, gyro, and trajectory debug"),
+            "lidar3d": ("LiDAR (3D)", "2.5D room-map prototype using LiDAR + IMU"),
+            "sd": ("SD Viewer", "Browse and download SD card files"),
+        }
+        if status:
+            meta["imu"] = (
+                "IMU",
+                f'IMU {"online" if status.imu_ok else "offline"} | raw debug + attitude estimation',
+            )
+            meta["lidar3d"] = (
+                "LiDAR (3D)",
+                f'Fusion {"ready" if status.lidar_ok and status.imu_ok else "waiting"} | LiDAR={status.lidar_ok} IMU={status.imu_ok}',
+            )
+        for key, (title, tooltip) in meta.items():
+            idx = self._tab_indices[key]
+            self._tabs.setTabText(idx, title)
+            self._tabs.setTabToolTip(idx, tooltip)
 
     def _edge_at(self, pos) -> str:
-        m = self._EDGE_MARGIN
-        w, h = self.width(), self.height()
+        margin = self._EDGE_MARGIN
         x, y = int(pos.x()), int(pos.y())
         edge = ""
-        if y < m:
+        if y < margin:
             edge += "top"
-        elif y > h - m:
+        elif y > self.height() - margin:
             edge += "bottom"
-        if x < m:
+        if x < margin:
             edge += "left"
-        elif x > w - m:
+        elif x > self.width() - margin:
             edge += "right"
         return edge
 
@@ -615,7 +614,6 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:
-        # Resize in progress
         if self._resize_edge and self._drag_pos is not None:
             gp = event.globalPosition().toPoint()
             dx = gp.x() - self._drag_pos.x()
@@ -635,20 +633,18 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
-        # Drag in progress
         if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
             return
 
-        # Hover: update cursor
         edge = self._edge_at(event.position())
         if edge in self._EDGE_CURSORS:
             self.setCursor(self._EDGE_CURSORS[edge])
         else:
             self.unsetCursor()
 
-    def mouseReleaseEvent(self, event) -> None:
+    def mouseReleaseEvent(self, _event) -> None:
         self._drag_pos = None
         self._resize_edge = ""
 
@@ -659,13 +655,8 @@ class MainWindow(QMainWindow):
             else:
                 self.showMaximized()
 
-    # ================================================================
-    #  Settings dialog
-    # ================================================================
-
     def _show_settings_dialog(self) -> None:
         class _SettingsDialog(QDialog):
-            """QDialog subclass that blocks Enter from closing."""
             def __init__(self, parent):
                 super().__init__(parent)
                 self.enter_actions: dict = {}
@@ -673,95 +664,65 @@ class MainWindow(QMainWindow):
             def keyPressEvent(self, event):
                 if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                     focused = self.focusWidget()
-                    # QSpinBox focus is on its internal QLineEdit
                     for widget, action in self.enter_actions.items():
-                        if focused is widget or (hasattr(widget, 'lineEdit') and focused is widget.lineEdit()):
+                        if focused is widget or (hasattr(widget, "lineEdit") and focused is widget.lineEdit()):
                             action()
                             break
                     event.accept()
                     return
                 super().keyPressEvent(event)
 
-        dlg = _SettingsDialog(self)
-        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.FramelessWindowHint)
-        dlg.setStyleSheet(self._POPUP_STYLE)
-        dlg.setFixedWidth(360)
+        dialog = _SettingsDialog(self)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        dialog.setStyleSheet(self._POPUP_STYLE)
+        dialog.setFixedWidth(360)
 
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Title bar with close button
         title_bar = QHBoxLayout()
         title_bar.setContentsMargins(12, 8, 8, 4)
-        title_label = QLabel("<b>Settings</b>")
-        title_bar.addWidget(title_label)
+        title_bar.addWidget(QLabel("<b>Settings</b>"))
         title_bar.addStretch()
         btn_close = QPushButton("\u2715")
         btn_close.setStyleSheet("padding: 2px 8px; font-size: 13px; color: #888; border: none;")
-        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_close.clicked.connect(dlg.accept)
+        btn_close.clicked.connect(dialog.accept)
         title_bar.addWidget(btn_close)
         outer.addLayout(title_bar)
 
         form = QVBoxLayout()
         form.setContentsMargins(12, 4, 12, 12)
         form.setSpacing(10)
-
-        # --- Status poll section ---
-        poll_label = QLabel("<b>Status Poll</b>")
-        form.addWidget(poll_label)
+        form.addWidget(QLabel("<b>Status Poll</b>"))
 
         poll_row = QHBoxLayout()
-        poll_row.setSpacing(0)
         poll_presets = [("OFF", 0), ("1s", 1000), ("2s", 2000), ("5s", 5000), ("10s", 10000)]
         poll_buttons: list[QPushButton] = []
-
-        _POLL_BTN = "padding: 4px 0; font-size: 11px; border-radius: 0; border: 1px solid #444; min-width: 38px;"
-        _POLL_ON = _POLL_BTN + "background-color: #1565C0; color: white; border-color: #1976D2;"
-        _POLL_OFF = _POLL_BTN + "background-color: #1a1a1a; color: #888;"
-        _POLL_FIRST = " border-top-left-radius: 4px; border-bottom-left-radius: 4px;"
-        _POLL_LAST = " border-top-right-radius: 4px; border-bottom-right-radius: 4px;"
+        btn_base = "padding: 4px 0; font-size: 11px; border-radius: 0; border: 1px solid #444; min-width: 38px;"
+        btn_on = btn_base + "background-color: #1565C0; color: white; border-color: #1976D2;"
+        btn_off = btn_base + "background-color: #1a1a1a; color: #888;"
 
         def on_poll_select(ms: int) -> None:
-            if ms == self._status_poll_interval:
-                return
             self._status_poll_interval = ms
             self._restart_status_timer()
-            for b, (_, v) in zip(poll_buttons, poll_presets):
-                is_first = b is poll_buttons[0]
-                is_last = b is poll_buttons[-1]
-                base = _POLL_ON if v == ms else _POLL_OFF
-                extra = (_POLL_FIRST if is_first else "") + (_POLL_LAST if is_last else "")
-                b.setStyleSheet(base + extra)
-            msg = f"Poll interval → {ms // 1000}s" if ms > 0 else "Poll disabled (device push only)"
-            self._conn.log_message.emit(f"Settings: {msg}")
+            for button, (_, value) in zip(poll_buttons, poll_presets):
+                button.setStyleSheet(btn_on if value == ms else btn_off)
             self._save_settings()
 
-        for i, (label, ms) in enumerate(poll_presets):
-            btn = QPushButton(label)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            is_active = ms == self._status_poll_interval
-            base = _POLL_ON if is_active else _POLL_OFF
-            extra = (_POLL_FIRST if i == 0 else "") + (_POLL_LAST if i == len(poll_presets) - 1 else "")
-            btn.setStyleSheet(base + extra)
-            btn.clicked.connect(lambda _, m=ms: on_poll_select(m))
-            poll_buttons.append(btn)
-            poll_row.addWidget(btn)
-
+        for label, ms in poll_presets:
+            button = QPushButton(label)
+            button.setStyleSheet(btn_on if ms == self._status_poll_interval else btn_off)
+            button.clicked.connect(lambda _, value=ms: on_poll_select(value))
+            poll_buttons.append(button)
+            poll_row.addWidget(button)
         form.addLayout(poll_row)
 
         outer.addLayout(form)
-        dlg.setLayout(outer)
-        dlg.exec()
+        dialog.setLayout(outer)
+        dialog.exec()
 
-    # ================================================================
-    #  Misc
-    # ================================================================
-
-    _POPUP_STYLE = (
-        "QMessageBox, QDialog { border: 1px solid #555; border-radius: 6px; padding: 8px; }"
-    )
+    _POPUP_STYLE = "QMessageBox, QDialog { border: 1px solid #555; border-radius: 6px; padding: 8px; }"
 
     def closeEvent(self, event) -> None:
         msg = QMessageBox(self)
@@ -780,11 +741,8 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def _show_device_select(self) -> None:
-        """Switch to device selection page."""
         self._stack.setCurrentIndex(0)
         self._btn_devices.setVisible(False)
-        for btn in self._view_buttons.values():
-            btn.setVisible(False)
 
     def _on_server_stopped(self) -> None:
         self._status_panel.set_disconnected()
@@ -803,12 +761,101 @@ class MainWindow(QMainWindow):
             self._status_timer.start(self._status_poll_interval)
 
     def _poll_status(self) -> None:
-        if self._conn.connected:
+        if self._conn.connected and not self._demo_mode:
             self._conn.send_command(CMD_GET_STATUS)
+
+    def _toggle_demo(self) -> None:
+        if self._demo_mode:
+            self._stop_demo()
+        else:
+            self._start_demo()
+
+    def _start_demo(self) -> None:
+        if self._conn.connected:
+            self._conn.disconnect()
+        self._demo_mode = True
+        self._stack.setCurrentIndex(1)
+        self._btn_devices.setVisible(True)
+        self._status_timer.stop()
+        self._uptime_timer.start()
+        self._connected_at = time.monotonic()
+        self._total_bytes = 0
+        self._dashboard_camera_panel.reset()
+        self._dashboard_lidar_panel.reset()
+        self._camera_panel.reset()
+        self._lidar_panel.reset()
+        self._imu_panel.reset()
+        self._lidar3d_panel.reset()
+        self._sd_panel.reset()
+        self._status_panel.set_connected("Prototype Simulator")
+        self._dashboard_status_panel.set_connected("Prototype Simulator")
+        self._map_controls.set_demo_running(True)
+        self._map_controls.set_sensor_state(True, True)
+        self._update_sensor_tabs(None)
+        self._tabs.setCurrentIndex(self._tab_indices["lidar3d"])
+        self._simulator.start()
+
+    def _stop_demo(self) -> None:
+        self._simulator.stop()
+
+    def _on_demo_started(self) -> None:
+        self._map_controls.set_demo_running(True)
+
+    def _on_demo_stopped(self) -> None:
+        self._demo_mode = False
+        self._map_controls.set_demo_running(False)
+        if not self._conn.connected:
+            self._status_panel.set_disconnected()
+            self._dashboard_status_panel.set_disconnected()
+            self._uptime_timer.stop()
+            self._dashboard_camera_panel.reset()
+            self._dashboard_lidar_panel.reset()
+            self._camera_panel.reset()
+            self._lidar_panel.reset()
+            self._imu_panel.reset()
+            self._lidar3d_panel.reset()
+            self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
+            self._map_controls.set_sensor_state(False, False)
+            self._update_sensor_tabs(None)
+            self._show_device_select()
+
+    def _on_demo_frame(self, status_data, imu_frame, lidar_frame) -> None:
+        if not self._demo_mode:
+            return
+        status = DeviceStatus(
+            scan_state=status_data["scan_state"],
+            lidar_rpm=status_data["lidar_rpm"],
+            sd_free_mb=0,
+            sd_total_mb=0,
+            frame_count=status_data["frame_count"],
+            scan_duration_ms=status_data["scan_duration_ms"],
+            battery_pct=0xFF,
+            camera_streaming=status_data["camera_streaming"],
+            sensor_flags=status_data["sensor_flags"],
+        )
+        self._current_status = status
+        self._status_panel.update_status(status)
+        self._dashboard_status_panel.update_status(status)
+        self._update_sensor_tabs(status)
+        self._imu_panel.update_frame(imu_frame)
+        snapshot = self._imu_panel.get_snapshot()
+        _roll, _pitch, yaw = self._imu_panel.get_orientation_deg()
+        self._dashboard_lidar_panel.update_frame(lidar_frame)
+        self._lidar_panel.update_frame(lidar_frame)
+        self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
+        self._lidar3d_panel.set_orientation(yaw)
+        self._lidar3d_panel.update_lidar_frame(lidar_frame)
+        self._map_controls.set_sensor_state(True, True)
+        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
 
     def _on_reset(self) -> None:
         self._log_panel._clear()
+        self._dashboard_camera_panel.reset()
+        self._dashboard_lidar_panel.reset()
+        self._dashboard_status_panel.reset()
         self._camera_panel.reset()
         self._status_panel.reset()
         self._lidar_panel.reset()
-        self._command_panel.reset_lidar_state()
+        self._imu_panel.reset()
+        self._lidar3d_panel.reset()
+        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())

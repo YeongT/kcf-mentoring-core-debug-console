@@ -19,14 +19,20 @@ from protocol import (
     PREFIX_STATUS,
     PREFIX_CAMERA,
     PREFIX_LIDAR,
+    PREFIX_IMU,
+    PREFIX_SD_CHUNK,
     CMD_NAMES,
+    CMD_SD_DOWNLOAD,
+    CMD_SD_LIST,
     RESULT_OK,
     SCAN_STATE_NAMES,
     INIT_FLAG_START_STREAM,
     format_hex,
     parse_init,
+    parse_imu_frame,
     parse_response,
     parse_status,
+    parse_sd_chunk,
     parse_lidar_frame,
 )
 
@@ -106,6 +112,16 @@ def _describe_message(direction: str, data: bytes) -> str:
         frame = parse_lidar_frame(data)
         if frame:
             return f"LIDAR {len(frame.points)} points"
+
+    if prefix == PREFIX_IMU:
+        frame = parse_imu_frame(data)
+        if frame:
+            return f"IMU {len(frame.samples)} samples"
+
+    if prefix == PREFIX_SD_CHUNK:
+        chunk = parse_sd_chunk(data)
+        if chunk:
+            return f"SD_CHUNK offset={chunk.offset} size={len(chunk.data)} eof={int(chunk.is_eof)}"
 
     prefix_name = PREFIX_NAMES.get(prefix, f"0x{prefix:02X}")
     return f"{prefix_name} ({len(data)} bytes)"
