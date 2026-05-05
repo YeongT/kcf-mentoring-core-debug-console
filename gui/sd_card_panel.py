@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from protocol import CMD_SD_DOWNLOAD, CMD_SD_LIST, parse_response, parse_sd_chunk, parse_sd_entries
+from protocol import CMD_SD_DOWNLOAD, CMD_SD_LIST, parse_response, parse_sd_chunk, parse_sd_entries, DeviceStatus, CMD_GET_STATUS
 from ws_server import DeviceConnection
 
 
@@ -75,6 +75,12 @@ class SdCardPanel(QGroupBox):
         top.addWidget(self._btn_download)
 
         top.addStretch()
+        
+        self._capacity = QLabel("Capacity: --")
+        self._capacity.setFont(QFont("Consolas", 9))
+        self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
+        top.addWidget(self._capacity)
+        
         self._status = QLabel("No SD listing loaded")
         self._status.setStyleSheet("color: #90A4AE;")
         top.addWidget(self._status)
@@ -128,6 +134,15 @@ class SdCardPanel(QGroupBox):
         if self._conn.connected:
             self._status.setText("Loading SD card tree...")
             self._conn.send_command(CMD_SD_LIST)
+            self._conn.send_command(CMD_GET_STATUS)
+
+    def update_status(self, status: DeviceStatus) -> None:
+        if status.sd_total_mb == 0:
+            self._capacity.setText("Capacity: Not Mounted")
+            self._capacity.setStyleSheet("color: #F44336; font-weight: bold; margin-right: 10px;")
+        else:
+            self._capacity.setText(f"Capacity: {status.sd_str}")
+            self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)

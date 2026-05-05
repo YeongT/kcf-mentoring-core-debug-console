@@ -79,12 +79,12 @@ class LidarCanvas(QWidget):
         for x_mm, y_mm in self._points:
             sx = cx + x_mm * scale
             sy = cy - y_mm * scale  # Y inverted for screen coords
-            painter.drawEllipse(QPointF(sx, sy), 2, 2)
+            painter.drawEllipse(QPointF(sx, sy), 2.0, 2.0)
 
         # Draw center (device position)
         painter.setPen(QPen(QColor(255, 100, 100)))
         painter.setBrush(QBrush(QColor(255, 100, 100)))
-        painter.drawEllipse(QPointF(cx, cy), 4, 4)
+        painter.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
 
         painter.end()
 

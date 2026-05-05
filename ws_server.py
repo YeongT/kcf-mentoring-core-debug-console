@@ -31,7 +31,7 @@ class DeviceConnection(QObject):
     device_connected = pyqtSignal(str, bytes)  # device_name, initial status bytes
     device_disconnected = pyqtSignal()
     response_received = pyqtSignal(bytes)  # raw RES message
-    status_received = pyqtSignal(bytes)  # raw STATUS message (18B)
+    status_received = pyqtSignal(bytes)  # raw STATUS message (v1: 21B, v2: 22B + Prefix)
     camera_frame_received = pyqtSignal(bytes)  # raw CAMERA message
     lidar_frame_received = pyqtSignal(bytes)  # raw LIDAR message
     imu_frame_received = pyqtSignal(bytes)  # raw IMU message
@@ -308,7 +308,12 @@ class WebSocketServer(QObject):
             conn.log_message.emit(f"INIT_ACK sent ({', '.join(parts)})")
 
             # Build initial status bytes for the signal (prefix + DeviceStatus)
-            initial_status = bytes([PREFIX_STATUS]) + first_msg[3 + first_msg[2]:][:DeviceStatus.STRUCT_SIZE]
+            raw_status_data = first_msg[3 + first_msg[2]:]
+            if len(raw_status_data) >= 21:
+                # Provide at least 21 bytes, cap at STRUCT_SIZE (22)
+                initial_status = bytes([PREFIX_STATUS]) + raw_status_data[:DeviceStatus.STRUCT_SIZE]
+            else:
+                initial_status = b""
         else:
             initial_status = b""
 
@@ -335,10 +340,14 @@ class WebSocketServer(QObject):
                             conn.sd_chunk_received.emit(message)
                     elif isinstance(message, str):
                         conn.log_message.emit(f"TEXT: {message}")
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
                 except Exception as e:
-                    conn.log_message.emit(f"Handler error: {e}")
+                    conn.log_message.emit(f"Message processing error: {e}")
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
         except Exception as e:
-            conn.log_message.emit(f"Connection error: {e}")
+            conn.log_message.emit(f"WebSocket connection error: {e}")
         finally:
             if conn._clear_connection(conn_id):
                 conn.device_disconnected.emit()

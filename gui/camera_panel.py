@@ -27,7 +27,7 @@ class CameraPanel(QGroupBox):
 
         self._image_label = QLabel("No camera feed")
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setMinimumSize(320, 240)
+        self._image_label.setMinimumSize(160, 120)
         self._image_label.setStyleSheet("background-color: #1a1a1a; color: #666; border: 1px solid #333;")
         self._image_label.setScaledContents(False)
         layout.addWidget(self._image_label, 1)

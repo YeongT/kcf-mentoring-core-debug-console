@@ -7,7 +7,7 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPainterPath
 from PyQt6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from protocol import ImuFrame
@@ -51,7 +51,7 @@ class SignalChart(QWidget):
         self._unit = unit
         self._series = {"x": deque(maxlen=220), "y": deque(maxlen=220), "z": deque(maxlen=220)}
         self._colors = {"x": QColor("#4FC3F7"), "y": QColor("#81C784"), "z": QColor("#FFB74D")}
-        self.setMinimumHeight(170)
+        self.setMinimumHeight(100)
         self.setStyleSheet("background-color: #0A0E14; border: 1px solid #202A35; border-radius: 6px;")
 
     def push(self, x: float, y: float, z: float) -> None:
@@ -136,7 +136,7 @@ class AttitudeWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(16, 16, -16, -16)
         center = rect.center()
-        radius = min(rect.width(), rect.height()) / 2
+        radius = int(min(rect.width(), rect.height()) / 2)
 
         painter.fillRect(rect, QColor("#0A0E14"))
         painter.setPen(QPen(QColor("#22303C"), 1))
@@ -145,19 +145,19 @@ class AttitudeWidget(QWidget):
         painter.save()
         painter.translate(center)
         painter.rotate(-self._roll_deg)
-        horizon_offset = max(-radius * 0.35, min(radius * 0.35, self._pitch_deg * 1.2))
+        horizon_offset = int(max(-radius * 0.35, min(radius * 0.35, self._pitch_deg * 1.2)))
         painter.setBrush(QColor("#24476B"))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(-radius, -radius * 2 + horizon_offset, radius * 2, radius * 2)
         painter.setBrush(QColor("#5F4B32"))
         painter.drawRect(-radius, horizon_offset, radius * 2, radius * 2)
         painter.setPen(QPen(QColor("#E3F2FD"), 2))
-        painter.drawLine(QPointF(-radius, horizon_offset), QPointF(radius, horizon_offset))
+        painter.drawLine(QPointF(-radius, float(horizon_offset)), QPointF(float(radius), float(horizon_offset)))
         painter.restore()
 
         painter.setPen(QPen(QColor("#CFD8DC"), 2))
-        painter.drawLine(center.x() - 24, center.y(), center.x() + 24, center.y())
-        painter.drawLine(center.x(), center.y() - 12, center.x(), center.y() + 12)
+        painter.drawLine(QPointF(center.x() - 24, center.y()), QPointF(center.x() + 24, center.y()))
+        painter.drawLine(QPointF(center.x(), center.y() - 12), QPointF(center.x(), center.y() + 12))
         painter.setFont(QFont("Consolas", 8))
         painter.setPen(QColor("#90A4AE"))
         painter.drawText(rect.left(), rect.bottom() + 2, f"Yaw {self._yaw_deg:.1f} deg")
@@ -169,7 +169,7 @@ class TrajectoryCanvas(QWidget):
         super().__init__()
         self._trail = deque(maxlen=320)
         self._yaw_deg = 0.0
-        self.setMinimumHeight(250)
+        self.setMinimumHeight(150)
         self.setStyleSheet("background-color: #0A0E14; border: 1px solid #202A35; border-radius: 6px;")
 
     def update_state(self, trail: deque[tuple[float, float]], yaw_deg: float) -> None:
@@ -214,16 +214,16 @@ class TrajectoryCanvas(QWidget):
                 painter.setPen(QPen(QColor(79, 195, 247, alpha), 1.5))
                 painter.drawLine(start, end)
 
-        center = QPointF(rect.center())
+        center = QPointF(float(rect.center().x()), float(rect.center().y()))
         painter.setPen(QPen(QColor("#FF7043"), 2))
         painter.setBrush(QColor("#FF7043"))
-        painter.drawEllipse(center, 4, 4)
+        painter.drawEllipse(center, 4.0, 4.0)
 
         heading_len = min(rect.width(), rect.height()) * 0.18
         yaw_rad = math.radians(self._yaw_deg)
         end = QPointF(center.x() + math.cos(yaw_rad) * heading_len, center.y() - math.sin(yaw_rad) * heading_len)
         painter.drawLine(center, end)
-        painter.drawEllipse(end, 3, 3)
+        painter.drawEllipse(end, 3.0, 3.0)
         painter.end()
 
 
@@ -300,101 +300,105 @@ class ImuPanel(QGroupBox):
         ]
         for idx, (title, key) in enumerate(items):
             title_label, value_label = _metric_label(title)
-            values_layout.addWidget(title_label, idx, 0)
-            values_layout.addWidget(value_label, idx, 1)
+            row = idx // 2
+            col = (idx % 2) * 2
+            values_layout.addWidget(title_label, row, col)
+            values_layout.addWidget(value_label, row, col + 1)
             self._labels[key] = value_label
         values_box.setLayout(values_layout)
-        top_row.addWidget(values_box, 4)
+        
+        v_right = QVBoxLayout()
+        v_right.addWidget(values_box)
+        
+        top_row.addLayout(v_right, 4)
         layout.addLayout(top_row)
-
-        action_row = QHBoxLayout()
-        action_row.setSpacing(6)
-        self._btn_zero_yaw = QPushButton("Zero Yaw")
-        self._btn_zero_yaw.clicked.connect(self.zero_yaw)
-        action_row.addWidget(self._btn_zero_yaw)
-        self._btn_clear_trail = QPushButton("Clear Trail")
-        self._btn_clear_trail.clicked.connect(self.clear_trail)
-        action_row.addWidget(self._btn_clear_trail)
-        self._btn_reset_filter = QPushButton("Reset Filter")
-        self._btn_reset_filter.clicked.connect(self.reset_filter)
-        action_row.addWidget(self._btn_reset_filter)
-        action_row.addStretch()
-        self._hint_label = QLabel("Waiting for IMU preview packets.")
-        self._hint_label.setStyleSheet("color: #90A4AE;")
-        action_row.addWidget(self._hint_label)
-        layout.addLayout(action_row)
 
         layout.addWidget(self._accel_chart)
         layout.addWidget(self._gyro_chart)
         layout.addWidget(self._trail_canvas, 1)
         self.setLayout(layout)
 
-    def set_online(self, online: bool, reason: str | None = None) -> None:
+    def set_online(self, online: bool) -> None:
         self._online = online
         if online:
             self._card_state.set_value("LIVE", "#4CAF50")
-            self._hint_label.setText(reason or "Receiving IMU batches.")
         else:
             self._card_state.set_value("WAIT", "#FF9800")
             self._card_age.set_value("--", "#90A4AE")
             self._card_rate.set_value("--", "#90A4AE")
-            self._hint_label.setText(reason or "IMU sensor is offline or no preview data is arriving.")
         self._emit_state()
 
     def update_frame(self, frame: ImuFrame) -> None:
         if not frame.samples:
             return
 
-        self.set_online(True, "IMU stream healthy")
+        self.set_online(True)
         frame_dt_total = 0.0
         frame_dt_count = 0
 
         for sample in frame.samples:
             self._sample_count += 1
             if self._last_timestamp_us is None:
-                dt = 0.0
+                dt = 0.005  # Assume 200Hz if no history
             else:
-                dt = max(0.001, min(0.05, (sample.timestamp_us - self._last_timestamp_us) / 1_000_000.0))
+                # Calculate actual dt from hardware timestamps (us -> s)
+                dt_us = sample.timestamp_us - self._last_timestamp_us
+                if dt_us <= 0 or dt_us > 100000:  # Gap > 100ms or negative
+                    dt = 0.005
+                else:
+                    dt = dt_us / 1_000_000.0
+            
             self._last_timestamp_us = sample.timestamp_us
             self._last_wall_time = time.monotonic()
+            
             if dt > 0:
                 frame_dt_total += dt
                 frame_dt_count += 1
 
-            ax = sample.accel_x_g
-            ay = sample.accel_y_g
-            az = sample.accel_z_g
-            gx = sample.gyro_x_dps
-            gy = sample.gyro_y_dps
-            gz = sample.gyro_z_dps
+            ax, ay, az = sample.accel_x_g, sample.accel_y_g, sample.accel_z_g
+            gx, gy, gz = sample.gyro_x_dps, sample.gyro_y_dps, sample.gyro_z_dps
             self._latest_accel = (ax, ay, az)
             self._latest_gyro = (gx, gy, gz)
 
             self._accel_chart.push(ax, ay, az)
             self._gyro_chart.push(gx, gy, gz)
 
+            # --- Attitude Estimation (Complementary Filter) ---
+            # Accelerometer angles (Pitch/Roll)
             roll_acc = math.atan2(ay, az if abs(az) > 1e-6 else 1e-6)
             pitch_acc = math.atan2(-ax, math.sqrt(ay * ay + az * az))
-            alpha = 0.98
+            
+            # Filter constant: larger = trust gyro more (smooth but drifts), smaller = trust accel more (noisy but stable)
+            alpha = 0.96 
             if dt > 0:
                 self._roll = alpha * (self._roll + math.radians(gx) * dt) + (1 - alpha) * roll_acc
                 self._pitch = alpha * (self._pitch + math.radians(gy) * dt) + (1 - alpha) * pitch_acc
                 self._yaw += math.radians(gz) * dt
 
+                # --- Position Integration (Experimental) ---
                 cr, sr = math.cos(self._roll), math.sin(self._roll)
                 cp, sp = math.cos(self._pitch), math.sin(self._pitch)
                 cy, sy = math.cos(self._yaw), math.sin(self._yaw)
+                
+                # Rotation matrix (World to Body) - simplified ZYX
                 rot = (
                     (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
                     (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
                     (-sp, cp * sr, cp * cr),
                 )
 
+                # Transform body accel to world accel (remove gravity)
                 world_ax = rot[0][0] * ax + rot[0][1] * ay + rot[0][2] * az
                 world_ay = rot[1][0] * ax + rot[1][1] * ay + rot[1][2] * az
                 world_az = rot[2][0] * ax + rot[2][1] * ay + rot[2][2] * az - 1.0
 
-                damping = 0.92
+                # Zero-velocity update / thresholding to reduce drift
+                acc_threshold = 0.05 # G
+                if abs(world_ax) < acc_threshold: world_ax = 0
+                if abs(world_ay) < acc_threshold: world_ay = 0
+                
+                # Damping should be high for drift reduction if not moving
+                damping = math.pow(0.98, dt * 100) # Time-dependent damping
                 for idx, world_acc in enumerate((world_ax, world_ay, world_az)):
                     self._velocity[idx] = (self._velocity[idx] + world_acc * 9.80665 * dt) * damping
                     self._position[idx] += self._velocity[idx] * dt
@@ -435,7 +439,7 @@ class ImuPanel(QGroupBox):
         self._card_age.set_value(f"{age_ms} ms", color)
 
     def _emit_state(self) -> None:
-        message = self._hint_label.text() if hasattr(self, "_hint_label") else ""
+        message = "IMU streaming active" if self._online else "Waiting for preview packets..."
         self.state_changed.emit(self._online, message)
 
     def zero_yaw(self) -> None:
@@ -504,7 +508,6 @@ class ImuPanel(QGroupBox):
         self._card_age.set_value("--", "#90A4AE")
         self._card_rate.set_value("--", "#90A4AE")
         self._card_mode.set_value("Idle", "#90A4AE")
-        self._hint_label.setText("Waiting for IMU preview packets.")
         self._attitude.reset()
         self._accel_chart.reset()
         self._gyro_chart.reset()

@@ -234,8 +234,8 @@ class DeviceStatus:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
-        if len(data) < 21:
-            raise ValueError(f"DeviceStatus needs at least 21 bytes, got {len(data)}")
+        if len(data) < 20:
+            raise ValueError(f"DeviceStatus needs at least 20 bytes, got {len(data)}")
         scan_state = data[0]
         lidar_rpm = struct.unpack_from("<H", data, 1)[0]
         sd_free_mb = struct.unpack_from("<I", data, 3)[0]
@@ -243,7 +243,8 @@ class DeviceStatus:
         frame_count = struct.unpack_from("<I", data, 11)[0]
         scan_duration_ms = struct.unpack_from("<I", data, 15)[0]
         battery_pct = data[19]
-        camera_streaming = data[20]
+        # v1+: added camera_streaming at byte 20, sensor_flags at byte 21
+        camera_streaming = data[20] if len(data) >= 21 else 0
         sensor_flags = data[21] if len(data) >= 22 else 0
         return cls(
             scan_state=scan_state,
@@ -646,10 +647,10 @@ def parse_response(data: bytes) -> Optional[CommandResponse]:
 
 
 def parse_status(data: bytes) -> Optional[DeviceStatus]:
-    """Parse a STATUS message: [0x20] [DeviceStatus: 22B]"""
-    if len(data) < 23 or data[0] != PREFIX_STATUS:
+    """Parse a STATUS message: [0x20] [DeviceStatus: 21-22B]"""
+    if len(data) < 21 or data[0] != PREFIX_STATUS:
         return None
-    return DeviceStatus.from_bytes(data[1:23])
+    return DeviceStatus.from_bytes(data[1:])
 
 
 def parse_camera_frame(data: bytes) -> Optional[bytes]:

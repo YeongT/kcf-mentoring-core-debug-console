@@ -106,12 +106,18 @@ class MainWindow(QMainWindow):
         top_bar.setSpacing(6)
 
         self._btn_settings = QPushButton("\u2699")
-        self._btn_settings.setStyleSheet("padding: 4px 10px; font-size: 16px;")
+        self._btn_settings.setStyleSheet(
+            "QPushButton { padding: 4px 8px; font-size: 16px; background: transparent; border: none; } "
+            "QPushButton:hover { background-color: #1B2731; border-radius: 4px; }"
+        )
         self._btn_settings.clicked.connect(self._show_settings_dialog)
         top_bar.addWidget(self._btn_settings)
 
         self._btn_devices = QPushButton("\u25c0 Devices")
-        self._btn_devices.setStyleSheet("padding: 4px 10px; font-size: 11px; color: #90CAF9;")
+        self._btn_devices.setStyleSheet(
+            "QPushButton { padding: 4px 8px; font-size: 11px; color: #90CAF9; background: transparent; border: none; } "
+            "QPushButton:hover { background-color: #1B2731; border-radius: 4px; }"
+        )
         self._btn_devices.clicked.connect(self._show_device_select)
         self._btn_devices.setVisible(False)
         top_bar.addWidget(self._btn_devices)
@@ -123,7 +129,10 @@ class MainWindow(QMainWindow):
         top_bar.addStretch()
 
         btn_quit = QPushButton("\u2715")
-        btn_quit.setStyleSheet("padding: 4px 10px; font-size: 14px; color: #888;")
+        btn_quit.setStyleSheet(
+            "QPushButton { padding: 4px 8px; font-size: 14px; color: #888; background: transparent; border: none; } "
+            "QPushButton:hover { background-color: #3B1D1D; color: #F44336; border-radius: 4px; }"
+        )
         btn_quit.clicked.connect(self.close)
         top_bar.addWidget(btn_quit)
         main_layout.addLayout(top_bar)
@@ -423,7 +432,7 @@ class MainWindow(QMainWindow):
             self._stop_demo()
         self._status_panel.set_connected(device_name)
         self._dashboard_status_panel.set_connected(device_name)
-        self._imu_panel.set_online(False, "Connected. Waiting for first IMU preview batch.")
+        self._imu_panel.set_online(False)
         self._map_controls.set_sensor_state(False, False)
         self._connected_at = time.monotonic()
         self._total_bytes = 0
@@ -438,6 +447,8 @@ class MainWindow(QMainWindow):
     def _on_disconnected(self) -> None:
         if self._demo_mode:
             return
+        self._title.setText("Sensor Debug Console")
+        self._title.setStyleSheet("color: #CFD8DC;")
         self._status_panel.set_disconnected()
         self._dashboard_status_panel.set_disconnected()
         self._uptime_timer.stop()
@@ -475,7 +486,7 @@ class MainWindow(QMainWindow):
         self._current_status = status
         self._status_panel.update_status(status)
         self._dashboard_status_panel.update_status(status)
-        self._imu_panel.set_online(status.imu_ok, "IMU connected. Waiting for live preview..." if status.imu_ok else "IMU sensor offline")
+        self._imu_panel.set_online(status.imu_ok)
         self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
         self._update_sensor_tabs(status)
         self._sync_tab_meta(status)
@@ -508,12 +519,13 @@ class MainWindow(QMainWindow):
         resp = parse_response(data)
         if not resp:
             return
-        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= DeviceStatus.STRUCT_SIZE:
+        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= 21:
             status = DeviceStatus.from_bytes(resp.payload)
             self._current_status = status
             self._status_panel.update_status(status)
             self._dashboard_status_panel.update_status(status)
-            self._imu_panel.set_online(status.imu_ok, "IMU connected. Waiting for live preview..." if status.imu_ok else "IMU sensor offline")
+            self._sd_panel.update_status(status)
+            self._imu_panel.set_online(status.imu_ok)
             self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
             self._update_sensor_tabs(status)
             self._sync_tab_meta(status)
@@ -619,16 +631,18 @@ class MainWindow(QMainWindow):
             dx = gp.x() - self._drag_pos.x()
             dy = gp.y() - self._drag_pos.y()
             geo = self.geometry()
+            new_geo = self.geometry()
+            
             if "right" in self._resize_edge:
-                geo.setRight(geo.right() + dx)
+                new_geo.setRight(max(new_geo.left() + self.minimumWidth(), new_geo.right() + dx))
             if "bottom" in self._resize_edge:
-                geo.setBottom(geo.bottom() + dy)
+                new_geo.setBottom(max(new_geo.top() + self.minimumHeight(), new_geo.bottom() + dy))
             if "left" in self._resize_edge:
-                geo.setLeft(geo.left() + dx)
+                new_geo.setLeft(min(new_geo.right() - self.minimumWidth(), new_geo.left() + dx))
             if "top" in self._resize_edge:
-                geo.setTop(geo.top() + dy)
-            if geo.width() >= self.minimumWidth() and geo.height() >= self.minimumHeight():
-                self.setGeometry(geo)
+                new_geo.setTop(min(new_geo.bottom() - self.minimumHeight(), new_geo.top() + dy))
+                
+            self.setGeometry(new_geo)
             self._drag_pos = gp
             event.accept()
             return
@@ -856,6 +870,10 @@ class MainWindow(QMainWindow):
         self._camera_panel.reset()
         self._status_panel.reset()
         self._lidar_panel.reset()
+        self._imu_panel.reset()
+        self._lidar3d_panel.reset()
+        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
+
         self._imu_panel.reset()
         self._lidar3d_panel.reset()
         self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())

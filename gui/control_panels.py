@@ -338,52 +338,102 @@ class LidarControlPanel(QGroupBox):
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
-        layout.setSpacing(8)
+        layout.setSpacing(12)
         layout.setContentsMargins(10, 14, 10, 10)
 
+        # 1. Main Action Row
         actions = QHBoxLayout()
         self._btn_scan = QPushButton("Start Scan")
-        self._btn_scan.clicked.connect(self._toggle_scan)
-        actions.addWidget(self._btn_scan)
-        self._btn_reset = QPushButton("LiDAR Reset")
-        self._btn_reset.clicked.connect(lambda: self._conn.send_command(CMD_LIDAR_RESET))
+        self._btn_scan.setStyleSheet("font-weight: bold;")
+        self._btn_scan.clicked.connect(lambda _: self._toggle_scan())
+        actions.addWidget(self._btn_scan, 1)
+        
+        self._btn_reset = QPushButton("Reset")
+        self._btn_reset.clicked.connect(lambda _: self._conn.send_command(CMD_LIDAR_RESET))
         actions.addWidget(self._btn_reset)
+        
         self._btn_info = QPushButton("Probe")
-        self._btn_info.clicked.connect(self._probe)
+        self._btn_info.clicked.connect(lambda _: self._probe())
         actions.addWidget(self._btn_info)
         layout.addLayout(actions)
 
-        grid = QGridLayout()
-        grid.addWidget(QLabel("RPM"), 0, 0)
+        # 2. RPM Control Box
+        rpm_box = QGroupBox("Motor RPM Control")
+        rpm_layout = QVBoxLayout()
+        rpm_layout.setContentsMargins(8, 12, 8, 8)
+        rpm_layout.setSpacing(6)
+        
+        rpm_presets = QHBoxLayout()
+        rpm_presets.setSpacing(4)
+        for val in [0, 400, 600, 800]:
+            btn = QPushButton(str(val))
+            btn.setStyleSheet("padding: 4px; font-size: 10px;")
+            btn.clicked.connect(lambda _, v=val: self._set_rpm(v))
+            rpm_presets.addWidget(btn)
+        rpm_layout.addLayout(rpm_presets)
+        
+        rpm_slider_row = QHBoxLayout()
         self._rpm = QSpinBox()
         self._rpm.setRange(0, 2000)
         self._rpm.setValue(660)
         self._rpm.setSingleStep(10)
+        self._rpm.setSuffix(" RPM")
         self._rpm.valueChanged.connect(self._sync_init_settings)
-        grid.addWidget(self._rpm, 0, 1)
-        self._btn_rpm = QPushButton("Set RPM")
-        self._btn_rpm.clicked.connect(self._set_rpm)
-        grid.addWidget(self._btn_rpm, 0, 2)
+        rpm_slider_row.addWidget(self._rpm, 1)
+        
+        self._btn_rpm = QPushButton("Apply")
+        self._btn_rpm.clicked.connect(lambda _: self._set_rpm())
+        rpm_slider_row.addWidget(self._btn_rpm)
+        rpm_layout.addLayout(rpm_slider_row)
+        rpm_box.setLayout(rpm_layout)
+        layout.addWidget(rpm_box)
 
-        grid.addWidget(QLabel("Mode"), 1, 0)
-        self._mode = QComboBox()
-        self._mode.addItem("Standard", SCAN_MODE_STANDARD)
-        self._mode.addItem("Express", SCAN_MODE_EXPRESS)
-        self._mode.currentIndexChanged.connect(self._set_mode)
-        grid.addWidget(self._mode, 1, 1, 1, 2)
-        layout.addLayout(grid)
+        # 3. Scan Mode Selection
+        mode_box = QGroupBox("Scan Mode")
+        mode_layout = QHBoxLayout()
+        mode_layout.setContentsMargins(8, 12, 8, 8)
+        
+        self._mode_btn_std = QPushButton("Standard")
+        self._mode_btn_std.setCheckable(True)
+        self._mode_btn_std.setChecked(True)
+        self._mode_btn_std.clicked.connect(lambda _: self._set_mode(SCAN_MODE_STANDARD))
+        
+        self._mode_btn_exp = QPushButton("Express")
+        self._mode_btn_exp.setCheckable(True)
+        self._mode_btn_exp.clicked.connect(lambda _: self._set_mode(SCAN_MODE_EXPRESS))
+        
+        mode_layout.addWidget(self._mode_btn_std)
+        mode_layout.addWidget(self._mode_btn_exp)
+        mode_box.setLayout(mode_layout)
+        layout.addWidget(mode_box)
 
-        self._health = QLabel("Health: --")
+        # 4. Device Information & Health Panel
+        info_box = QGroupBox("Device Metrics")
+        info_layout = QGridLayout()
+        info_layout.setContentsMargins(8, 12, 8, 8)
+        info_layout.setVerticalSpacing(4)
+        
+        info_layout.addWidget(QLabel("Health:"), 0, 0)
+        self._health = QLabel("--")
         self._health.setFont(QFont("Consolas", 9))
-        self._health.setStyleSheet("color: #90A4AE;")
-        layout.addWidget(self._health)
+        info_layout.addWidget(self._health, 0, 1)
+        
+        info_layout.addWidget(QLabel("Model:"), 1, 0)
+        self._info_model = QLabel("--")
+        self._info_model.setFont(QFont("Consolas", 8))
+        self._info_model.setStyleSheet("color: #CFD8DC;")
+        info_layout.addWidget(self._info_model, 1, 1)
+        
+        info_layout.addWidget(QLabel("Serial:"), 2, 0)
+        self._info_serial = QLabel("--")
+        self._info_serial.setFont(QFont("Consolas", 8))
+        self._info_serial.setStyleSheet("color: #78909C;")
+        info_layout.addWidget(self._info_serial, 2, 1)
+        
+        info_box.setLayout(info_layout)
+        layout.addWidget(info_box)
 
-        self._info = QLabel("Model: --")
-        self._info.setFont(QFont("Consolas", 8))
-        self._info.setStyleSheet("color: #78909C;")
-        self._info.setWordWrap(True)
-        layout.addWidget(self._info)
-
+        layout.addStretch()
         self.setLayout(layout)
         self._set_controls_enabled(False)
 
@@ -402,8 +452,9 @@ class LidarControlPanel(QGroupBox):
         self._scanning = False
         self._btn_scan.setText("Start Scan")
         self._set_controls_enabled(False)
-        self._health.setText("Health: --")
-        self._info.setText("Model: --")
+        self._health.setText("--")
+        self._info_model.setText("--")
+        self._info_serial.setText("--")
 
     def _on_status(self, data: bytes) -> None:
         status = parse_status(data)
@@ -421,13 +472,14 @@ class LidarControlPanel(QGroupBox):
         if resp.cmd_id == CMD_LIDAR_GET_INFO and resp.ok:
             info = LidarInfo.from_bytes(resp.payload)
             if info:
-                self._info.setText(
-                    f"Model {info.major_model} | FW {info.firmware_str} | HW {info.hardware}\nSerial {info.serial}"
-                )
+                self._info_model.setText(f"M:{info.major_model} | FW:{info.firmware_str} | HW:{info.hardware}")
+                self._info_serial.setText(info.serial)
         elif resp.cmd_id == CMD_LIDAR_GET_HEALTH and resp.ok:
             health = LidarHealth.from_bytes(resp.payload)
             if health:
-                self._health.setText(f"Health: {health.status_name} (err={health.error_code})")
+                self._health.setText(f"{health.status_name} (err={health.error_code})")
+                color = "#4CAF50" if health.is_ok else "#FF9800"
+                self._health.setStyleSheet(f"color: {color}; font-weight: bold;")
         elif resp.cmd_id == CMD_START_SCAN and resp.ok:
             self._scanning = True
             self._btn_scan.setText("Stop Scan")
@@ -440,14 +492,23 @@ class LidarControlPanel(QGroupBox):
             return
         self._conn.send_command(CMD_STOP_SCAN if self._scanning else CMD_START_SCAN)
 
-    def _set_rpm(self) -> None:
-        if self._enabled:
-            self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", self._rpm.value()))
-            self._sync_init_settings()
+    def _set_rpm(self, val: int | None = None) -> None:
+        if not self._enabled:
+            return
+        if val is not None:
+            self._rpm.setValue(val)
+        self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", self._rpm.value()))
+        self._sync_init_settings()
 
-    def _set_mode(self) -> None:
-        if self._enabled and not self._scanning:
-            self._conn.send_command(CMD_LIDAR_SET_SCAN_MODE, struct.pack("B", int(self._mode.currentData())))
+    def _set_mode(self, mode: int) -> None:
+        if not self._enabled:
+            return
+        # Sync UI button states
+        self._mode_btn_std.setChecked(mode == SCAN_MODE_STANDARD)
+        self._mode_btn_exp.setChecked(mode == SCAN_MODE_EXPRESS)
+        
+        if not self._scanning:
+            self._conn.send_command(CMD_LIDAR_SET_SCAN_MODE, struct.pack("B", mode))
 
     def _probe(self) -> None:
         if self._conn.connected:
@@ -486,11 +547,6 @@ class ImuControlPanel(QGroupBox):
         layout.setSpacing(8)
         layout.setContentsMargins(10, 14, 10, 10)
 
-        self._status = QLabel("Waiting for IMU")
-        self._status.setFont(QFont("Consolas", 10))
-        self._status.setStyleSheet("color: #FF9800; font-weight: bold;")
-        layout.addWidget(self._status)
-
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
@@ -518,15 +574,15 @@ class ImuControlPanel(QGroupBox):
 
         action_row = QHBoxLayout()
         self._btn_zero_yaw = QPushButton("Zero Yaw")
-        self._btn_zero_yaw.clicked.connect(self._imu_panel.zero_yaw)
+        self._btn_zero_yaw.clicked.connect(lambda _: self._imu_panel.zero_yaw())
         action_row.addWidget(self._btn_zero_yaw)
         self._btn_clear_trail = QPushButton("Clear Trail")
-        self._btn_clear_trail.clicked.connect(self._imu_panel.clear_trail)
+        self._btn_clear_trail.clicked.connect(lambda _: self._imu_panel.clear_trail())
         action_row.addWidget(self._btn_clear_trail)
         layout.addLayout(action_row)
 
         self._btn_reset = QPushButton("Reset Filter")
-        self._btn_reset.clicked.connect(self._imu_panel.reset_filter)
+        self._btn_reset.clicked.connect(lambda _: self._imu_panel.reset_filter())
         layout.addWidget(self._btn_reset)
 
         protocol_box = QGroupBox("Protocol")
@@ -534,25 +590,26 @@ class ImuControlPanel(QGroupBox):
         protocol_layout.setSpacing(6)
 
         preview_row = QHBoxLayout()
-        self._preview_enabled = QCheckBox("Preview")
-        self._preview_enabled.setChecked(True)
-        preview_row.addWidget(self._preview_enabled)
+        rate_lbl = QLabel("Rate:")
+        rate_lbl.setStyleSheet("color: #78909C; font-size: 11px;")
+        preview_row.addWidget(rate_lbl)
         self._preview_interval = QSpinBox()
         self._preview_interval.setRange(20, 1000)
         self._preview_interval.setValue(50)
         self._preview_interval.setSuffix(" ms")
         preview_row.addWidget(self._preview_interval)
-        self._btn_apply_preview = QPushButton("Apply")
-        self._btn_apply_preview.clicked.connect(self._apply_preview)
-        preview_row.addWidget(self._btn_apply_preview)
+        
+        self._btn_toggle_preview = QPushButton("Start Monitor")
+        self._btn_toggle_preview.clicked.connect(lambda _: self._toggle_preview())
+        preview_row.addWidget(self._btn_toggle_preview)
         protocol_layout.addLayout(preview_row)
 
         protocol_actions = QHBoxLayout()
         self._btn_protocol = QPushButton("Protocol Info")
-        self._btn_protocol.clicked.connect(lambda: self._conn.send_command(CMD_GET_PROTOCOL_INFO))
+        self._btn_protocol.clicked.connect(lambda _: self._conn.send_command(CMD_GET_PROTOCOL_INFO))
         protocol_actions.addWidget(self._btn_protocol)
         self._btn_time_sync = QPushButton("Time Sync")
-        self._btn_time_sync.clicked.connect(self._request_time_sync)
+        self._btn_time_sync.clicked.connect(lambda _: self._request_time_sync())
         protocol_actions.addWidget(self._btn_time_sync)
         protocol_layout.addLayout(protocol_actions)
 
@@ -564,13 +621,6 @@ class ImuControlPanel(QGroupBox):
         protocol_box.setLayout(protocol_layout)
         layout.addWidget(protocol_box)
 
-        self._note = QLabel(
-            "축 고정, yaw drift, 순간 가속, 샘플레이트 변화를 여기서 바로 확인합니다.\n"
-            "값이 튀면 고정, 배선 장력, 진동부터 먼저 의심하면 됩니다."
-        )
-        self._note.setWordWrap(True)
-        self._note.setStyleSheet("color: #90A4AE;")
-        layout.addWidget(self._note)
         layout.addStretch()
         self.setLayout(layout)
         self._set_protocol_controls_enabled(False)
@@ -595,7 +645,8 @@ class ImuControlPanel(QGroupBox):
             if not info:
                 self._protocol_info.setText("Protocol info parse failed")
                 return
-            self._preview_enabled.setChecked(info.imu_preview_enabled)
+            self._is_previewing = info.imu_preview_enabled
+            self._sync_preview_button()
             if info.imu_interval_ms:
                 self._preview_interval.setValue(max(20, min(1000, info.imu_interval_ms)))
             self._protocol_info.setText(
@@ -617,19 +668,34 @@ class ImuControlPanel(QGroupBox):
                 f"RTT~{elapsed} ms"
             )
         elif resp.cmd_id == CMD_IMU_SET_PREVIEW:
+            self._sync_preview_button()
             if not resp.ok:
                 self._protocol_info.setText(f"IMU preview failed: {resp.result_name}")
                 return
             if len(resp.payload) >= 3:
                 enabled = resp.payload[0] != 0
                 interval = struct.unpack_from("<H", resp.payload, 1)[0]
-                self._preview_enabled.setChecked(enabled)
+                self._is_previewing = enabled
+                self._sync_preview_button()
                 self._preview_interval.setValue(max(20, min(1000, interval)))
                 self._protocol_info.setText(f"IMU preview {'ON' if enabled else 'OFF'} @ {interval} ms")
 
-    def _apply_preview(self) -> None:
-        payload = struct.pack("<BH", int(self._preview_enabled.isChecked()), self._preview_interval.value())
+    def _toggle_preview(self) -> None:
+        new_state = not self._is_previewing
+        self._btn_toggle_preview.setEnabled(False)
+        payload = struct.pack("<BH", int(new_state), self._preview_interval.value())
         self._conn.send_command(CMD_IMU_SET_PREVIEW, payload)
+
+    def _sync_preview_button(self) -> None:
+        self._btn_toggle_preview.setEnabled(True)
+        self._btn_toggle_preview.setText("Stop Monitor" if self._is_previewing else "Start Monitor")
+        if self._is_previewing:
+            self._btn_toggle_preview.setStyleSheet(
+                "QPushButton { background-color: #3B1D1D; color: #F44336; border: 1px solid #E53935; }"
+                "QPushButton:hover { background-color: #4A2525; }"
+            )
+        else:
+            self._btn_toggle_preview.setStyleSheet("")
 
     def _request_time_sync(self) -> None:
         self._last_sync_host_ms = int(time.monotonic() * 1000)
@@ -637,20 +703,16 @@ class ImuControlPanel(QGroupBox):
 
     def _set_protocol_controls_enabled(self, enabled: bool) -> None:
         for widget in (
-            self._preview_enabled,
             self._preview_interval,
-            self._btn_apply_preview,
+            self._btn_toggle_preview,
             self._btn_protocol,
             self._btn_time_sync,
         ):
             widget.setEnabled(enabled)
 
     def _update_state(self, online: bool, message: str) -> None:
-        self._status.setText("IMU LIVE" if online else "IMU WAIT")
-        self._status.setStyleSheet(
-            "color: #4CAF50; font-weight: bold;" if online else "color: #FF9800; font-weight: bold;"
-        )
-        self._note.setText(message)
+        # Status header removed to clean up duplicate UI. Logic preserved for future needs if any.
+        pass
 
     def _update_metrics(self, snapshot: dict) -> None:
         age_text = "--" if snapshot["age_ms"] is None else f'{snapshot["age_ms"]} ms'
@@ -709,13 +771,6 @@ class MappingControlPanel(QGroupBox):
         self._btn_clear.clicked.connect(self._map_panel.clear_map)
         layout.addWidget(self._btn_clear)
 
-        self._guide = QLabel(
-            "이 탭은 LiDAR 2D 점군을 IMU yaw에 맞춰 시간 누적으로 쌓아보는 프로토타입입니다.\n"
-            "실제 room map 품질은 IMU drift, extrinsic, scan matching 품질에 직접 영향을 받습니다."
-        )
-        self._guide.setWordWrap(True)
-        self._guide.setStyleSheet("color: #90A4AE;")
-        layout.addWidget(self._guide)
         layout.addStretch()
         self.setLayout(layout)
 
