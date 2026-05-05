@@ -31,7 +31,7 @@ class DeviceConnection(QObject):
     device_connected = pyqtSignal(str, bytes)  # device_name, initial status bytes
     device_disconnected = pyqtSignal()
     response_received = pyqtSignal(bytes)  # raw RES message
-    status_received = pyqtSignal(bytes)  # raw STATUS message (v1: 21B, v2: 22B + Prefix)
+    status_received = pyqtSignal(bytes)  # raw STATUS message (prefix + 22B DeviceStatus)
     camera_frame_received = pyqtSignal(bytes)  # raw CAMERA message
     lidar_frame_received = pyqtSignal(bytes)  # raw LIDAR message
     imu_frame_received = pyqtSignal(bytes)  # raw IMU message
@@ -178,22 +178,45 @@ class WebSocketServer(QObject):
         self._thread.start()
 
     def stop(self) -> None:
-        if not self._running:
+        if not self._running and not self._thread:
             return
         self._running = False
-        self._connection._clear_connection(self._connection._conn_id)
-        if self._loop:
-            if self._server:
-                self._loop.call_soon_threadsafe(self._server.close)
-            # Cancel pending tasks before stopping
-            self._loop.call_soon_threadsafe(self._cancel_tasks)
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread:
-            self._thread.join(timeout=3)
+        loop = self._loop
+        thread = self._thread
+        if loop and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+                future.result(timeout=3)
+            except Exception as e:
+                self._connection.log_message.emit(f"Server shutdown warning: {e}")
+                loop.call_soon_threadsafe(loop.stop)
+        if thread:
+            thread.join(timeout=3)
         self._thread = None
         self._loop = None
         self._server = None
         self.server_stopped.emit()
+
+    async def _shutdown(self) -> None:
+        self._running = False
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+        if self._connection._ws:
+            try:
+                await self._connection._ws.close()
+            except Exception:
+                pass
+        self._connection._clear_connection(self._connection._conn_id)
+
+        loop = asyncio.get_running_loop()
+        current = asyncio.current_task(loop)
+        pending = [task for task in asyncio.all_tasks(loop) if task is not current and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        loop.call_soon(loop.stop)
 
     def restart(self) -> None:
         """Stop and restart the server after socket release."""
@@ -201,10 +224,6 @@ class WebSocketServer(QObject):
         import time
         time.sleep(0.3)
         self.start()
-
-    def _cancel_tasks(self) -> None:
-        for task in asyncio.all_tasks(self._loop):
-            task.cancel()
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -309,8 +328,7 @@ class WebSocketServer(QObject):
 
             # Build initial status bytes for the signal (prefix + DeviceStatus)
             raw_status_data = first_msg[3 + first_msg[2]:]
-            if len(raw_status_data) >= 21:
-                # Provide at least 21 bytes, cap at STRUCT_SIZE (22)
+            if len(raw_status_data) >= DeviceStatus.STRUCT_SIZE:
                 initial_status = bytes([PREFIX_STATUS]) + raw_status_data[:DeviceStatus.STRUCT_SIZE]
             else:
                 initial_status = b""

@@ -218,7 +218,7 @@ SCAN_STATE_NAMES = {
 
 @dataclass
 class DeviceStatus:
-    """22-byte packed DeviceStatus struct (little-endian)."""
+    """Protocol v2 22-byte packed DeviceStatus struct (little-endian)."""
 
     scan_state: int = 0
     lidar_rpm: int = 0
@@ -234,8 +234,8 @@ class DeviceStatus:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
-        if len(data) < 20:
-            raise ValueError(f"DeviceStatus needs at least 20 bytes, got {len(data)}")
+        if len(data) < cls.STRUCT_SIZE:
+            raise ValueError(f"DeviceStatus needs {cls.STRUCT_SIZE} bytes, got {len(data)}")
         scan_state = data[0]
         lidar_rpm = struct.unpack_from("<H", data, 1)[0]
         sd_free_mb = struct.unpack_from("<I", data, 3)[0]
@@ -243,9 +243,8 @@ class DeviceStatus:
         frame_count = struct.unpack_from("<I", data, 11)[0]
         scan_duration_ms = struct.unpack_from("<I", data, 15)[0]
         battery_pct = data[19]
-        # v1+: added camera_streaming at byte 20, sensor_flags at byte 21
-        camera_streaming = data[20] if len(data) >= 21 else 0
-        sensor_flags = data[21] if len(data) >= 22 else 0
+        camera_streaming = data[20]
+        sensor_flags = data[21]
         return cls(
             scan_state=scan_state,
             lidar_rpm=lidar_rpm,
@@ -647,8 +646,8 @@ def parse_response(data: bytes) -> Optional[CommandResponse]:
 
 
 def parse_status(data: bytes) -> Optional[DeviceStatus]:
-    """Parse a STATUS message: [0x20] [DeviceStatus: 21-22B]"""
-    if len(data) < 21 or data[0] != PREFIX_STATUS:
+    """Parse a STATUS message: [0x20] [DeviceStatus: 22B]."""
+    if len(data) < 1 + DeviceStatus.STRUCT_SIZE or data[0] != PREFIX_STATUS:
         return None
     return DeviceStatus.from_bytes(data[1:])
 
@@ -740,7 +739,7 @@ def parse_sd_entries(data: bytes) -> list[SdEntry]:
 
 INIT_FLAG_START_STREAM = 0x01
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 @dataclass

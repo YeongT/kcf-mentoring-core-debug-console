@@ -6,6 +6,7 @@ import struct
 import time
 from typing import Callable
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -70,6 +71,8 @@ from ws_server import DeviceConnection
 
 
 class OverviewControlPanel(QGroupBox):
+    reset_requested = pyqtSignal()
+
     def __init__(self, connection: DeviceConnection):
         super().__init__("Dashboard Controls")
         self._conn = connection
@@ -90,6 +93,7 @@ class OverviewControlPanel(QGroupBox):
             ("Device Info", lambda: self._conn.send_command(CMD_GET_DEVICE_INFO)),
             ("Reconnect", self._conn.disconnect),
             ("Reboot", lambda: self._conn.send_command(CMD_REBOOT)),
+            ("Reset View", self.reset_requested.emit),
         ]
         for idx, (title, callback) in enumerate(buttons):
             button = QPushButton(title)
@@ -244,6 +248,7 @@ class CameraControlPanel(QGroupBox):
 
         self.setLayout(layout)
         self._set_controls_enabled(False)
+        self.sync_init_settings()
 
     def _connect_signals(self) -> None:
         self._conn.device_connected.connect(self._on_connected)
@@ -252,7 +257,7 @@ class CameraControlPanel(QGroupBox):
         self._conn.response_received.connect(self._on_response)
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
-        self._sync_init_settings()
+        self.sync_init_settings()
         self._conn.send_command(CMD_CAMERA_GET_INFO)
 
     def _on_disconnected(self) -> None:
@@ -271,6 +276,7 @@ class CameraControlPanel(QGroupBox):
         self._set_controls_enabled(self._enabled)
         self._btn_stream.setText("Stop Stream" if self._streaming else "Start Stream")
         self._info_label.setText("Streaming active" if self._streaming else "Camera ready")
+        self.sync_init_settings()
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)
@@ -286,9 +292,11 @@ class CameraControlPanel(QGroupBox):
         elif resp.cmd_id == CMD_START_STREAM and resp.ok:
             self._streaming = True
             self._btn_stream.setText("Stop Stream")
+            self.sync_init_settings()
         elif resp.cmd_id == CMD_STOP_STREAM and resp.ok:
             self._streaming = False
             self._btn_stream.setText("Start Stream")
+            self.sync_init_settings()
 
     def _toggle_stream(self) -> None:
         if not self._enabled:
@@ -297,20 +305,20 @@ class CameraControlPanel(QGroupBox):
             self._conn.send_command(CMD_STOP_STREAM)
         else:
             self._conn.send_command(CMD_START_STREAM, struct.pack("<H", self._interval.value()))
-        self._sync_init_settings()
+        self.sync_init_settings()
 
     def _apply_config(self) -> None:
         self._conn.send_command(
             CMD_SET_CAMERA_CONFIG,
             struct.pack("BB", int(self._resolution.currentData()), int(self._quality.currentData())),
         )
-        self._sync_init_settings()
+        self.sync_init_settings()
 
     def _send_param(self, param_id: int, value: int) -> None:
         if self._enabled and self._conn.connected:
             self._conn.send_command(CMD_CAMERA_SET_PARAM, struct.pack("<Bh", param_id, value))
 
-    def _sync_init_settings(self) -> None:
+    def sync_init_settings(self) -> None:
         settings = self._conn.init_ack_settings
         settings.stream_interval_ms = self._interval.value()
         settings.camera_resolution = int(self._resolution.currentData())
@@ -320,6 +328,9 @@ class CameraControlPanel(QGroupBox):
         else:
             settings.flags &= ~INIT_FLAG_START_STREAM
         self._conn.init_ack_settings = settings
+
+    def _sync_init_settings(self) -> None:
+        self.sync_init_settings()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for child_type in (QPushButton, QSpinBox, QComboBox, QCheckBox):
@@ -436,6 +447,7 @@ class LidarControlPanel(QGroupBox):
         layout.addStretch()
         self.setLayout(layout)
         self._set_controls_enabled(False)
+        self.sync_init_settings()
 
     def _connect_signals(self) -> None:
         self._conn.device_connected.connect(self._on_connected)
@@ -444,7 +456,7 @@ class LidarControlPanel(QGroupBox):
         self._conn.response_received.connect(self._on_response)
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
-        self._sync_init_settings()
+        self.sync_init_settings()
         self._probe()
 
     def _on_disconnected(self) -> None:
@@ -498,7 +510,7 @@ class LidarControlPanel(QGroupBox):
         if val is not None:
             self._rpm.setValue(val)
         self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", self._rpm.value()))
-        self._sync_init_settings()
+        self.sync_init_settings()
 
     def _set_mode(self, mode: int) -> None:
         if not self._enabled:
@@ -515,10 +527,13 @@ class LidarControlPanel(QGroupBox):
             self._conn.send_command(CMD_LIDAR_GET_INFO)
             self._conn.send_command(CMD_LIDAR_GET_HEALTH)
 
-    def _sync_init_settings(self) -> None:
+    def sync_init_settings(self) -> None:
         settings = self._conn.init_ack_settings
         settings.motor_rpm = self._rpm.value()
         self._conn.init_ack_settings = settings
+
+    def _sync_init_settings(self) -> None:
+        self.sync_init_settings()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for child_type in (QPushButton, QSpinBox, QComboBox):

@@ -31,8 +31,13 @@ from udp_discovery import UdpDiscoveryListener
 from ws_server import DeviceConnection, WebSocketServer
 
 from gui.camera_panel import CameraPanel
-from gui.command_panel import CommandPanel
-from gui.control_panels import CameraControlPanel, ImuControlPanel, LidarControlPanel, MappingControlPanel
+from gui.control_panels import (
+    CameraControlPanel,
+    ImuControlPanel,
+    LidarControlPanel,
+    MappingControlPanel,
+    OverviewControlPanel,
+)
 from gui.device_select_panel import DeviceSelectPanel
 from gui.imu_panel import ImuPanel
 from gui.lidar3d_panel import Lidar3DPanel
@@ -150,7 +155,7 @@ class MainWindow(QMainWindow):
         self._dashboard_camera_panel = CameraPanel()
         self._dashboard_lidar_panel = LidarPanel()
         self._dashboard_status_panel = StatusPanel()
-        self._dashboard_command_panel = CommandPanel(self._conn)
+        self._dashboard_command_panel = OverviewControlPanel(self._conn)
         self._dashboard_command_panel.setMinimumWidth(280)
         self._camera_panel = CameraPanel()
         self._camera_controls = CameraControlPanel(self._conn)
@@ -413,10 +418,15 @@ class MainWindow(QMainWindow):
             self._conn.log_message.emit(f"Disconnecting {self._conn.device_name} to switch device...")
             self._conn.disconnect()
 
+        self._sync_handshake_settings()
         server_ip = self._get_local_ip()
         self._conn.log_message.emit(f"Sending CONNECT to {device_name} @ {device_ip} -> {server_ip}:{self._server.port}")
         if self._discovery and not self._discovery.send_connect(device_ip, server_ip, self._server.port):
             self._conn.log_message.emit("Failed to send CONNECT packet")
+
+    def _sync_handshake_settings(self) -> None:
+        self._camera_controls.sync_init_settings()
+        self._lidar_controls.sync_init_settings()
 
     @staticmethod
     def _get_local_ip() -> str:
@@ -489,6 +499,7 @@ class MainWindow(QMainWindow):
         self._imu_panel.set_online(status.imu_ok)
         self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
         self._update_sensor_tabs(status)
+        self._sd_panel.update_status(status)
         self._sync_tab_meta(status)
 
     def _on_camera_frame(self, data: bytes) -> None:
@@ -519,15 +530,15 @@ class MainWindow(QMainWindow):
         resp = parse_response(data)
         if not resp:
             return
-        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= 21:
+        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= DeviceStatus.STRUCT_SIZE:
             status = DeviceStatus.from_bytes(resp.payload)
             self._current_status = status
             self._status_panel.update_status(status)
             self._dashboard_status_panel.update_status(status)
-            self._sd_panel.update_status(status)
             self._imu_panel.set_online(status.imu_ok)
             self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
             self._update_sensor_tabs(status)
+            self._sd_panel.update_status(status)
             self._sync_tab_meta(status)
 
     def _update_sensor_tabs(self, status: DeviceStatus | None) -> None:

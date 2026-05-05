@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from protocol import CMD_SD_DOWNLOAD, CMD_SD_LIST, parse_response, parse_sd_chunk, parse_sd_entries, DeviceStatus, CMD_GET_STATUS
+from protocol import CMD_SD_DOWNLOAD, CMD_SD_LIST, parse_response, parse_sd_chunk, parse_sd_entries, DeviceStatus, CMD_GET_STATUS, parse_status
 from ws_server import DeviceConnection
 
 
@@ -40,6 +40,7 @@ class SdCardPanel(QGroupBox):
         self._download_path: str | None = None
         self._download_fp = None
         self._entries_count = 0
+        self._sd_available = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(5000)
@@ -106,12 +107,20 @@ class SdCardPanel(QGroupBox):
         self._conn.sd_chunk_received.connect(self._on_sd_chunk)
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
+        if _initial_status:
+            status = parse_status(_initial_status)
+            if status:
+                self.update_status(status)
+        if not self._sd_available:
+            self._status.setText("SD card not mounted")
+            return
         if self._auto_refresh.isChecked():
             self._refresh_timer.start()
         self.request_refresh()
 
     def _on_disconnected(self) -> None:
         self._refresh_timer.stop()
+        self._sd_available = False
         self._tree.clear()
         self._entries_count = 0
         self._status.setText("Disconnected")
@@ -131,18 +140,26 @@ class SdCardPanel(QGroupBox):
             self._folder_label.setText(str(self._download_dir))
 
     def request_refresh(self) -> None:
-        if self._conn.connected:
+        if self._conn.connected and self._sd_available:
             self._status.setText("Loading SD card tree...")
             self._conn.send_command(CMD_SD_LIST)
             self._conn.send_command(CMD_GET_STATUS)
 
     def update_status(self, status: DeviceStatus) -> None:
-        if status.sd_total_mb == 0:
+        was_available = self._sd_available
+        self._sd_available = status.sd_ok and status.sd_total_mb > 0
+        if not self._sd_available:
+            self._refresh_timer.stop()
             self._capacity.setText("Capacity: Not Mounted")
             self._capacity.setStyleSheet("color: #F44336; font-weight: bold; margin-right: 10px;")
+            if self._entries_count == 0:
+                self._status.setText("SD card not mounted")
         else:
             self._capacity.setText(f"Capacity: {status.sd_str}")
             self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
+            if not was_available and self._conn.connected:
+                if self._auto_refresh.isChecked():
+                    self._refresh_timer.start()
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)
