@@ -63,6 +63,7 @@ from protocol import (
     LidarInfo,
     ProtocolInfo,
     SCAN_IDLE,
+    SCAN_SCANNING,
     SCAN_MODE_EXPRESS,
     SCAN_MODE_STANDARD,
     TimeSyncInfo,
@@ -516,7 +517,7 @@ class LidarControlPanel(QGroupBox):
         if not status:
             return
         self._enabled = status.lidar_ok
-        self._scanning = status.scan_state != SCAN_IDLE if self._enabled else False
+        self._scanning = status.scan_state == SCAN_SCANNING if self._enabled else False
         self._set_controls_enabled(self._enabled)
         self._btn_scan.setText("Stop Scan" if self._scanning else "Start Scan")
         if not self._enabled:

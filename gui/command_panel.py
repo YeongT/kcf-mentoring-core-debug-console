@@ -347,7 +347,7 @@ class CommandPanel(QGroupBox):
             return
         self._camera_available = status.camera_ok
         self._lidar_available = status.lidar_ok
-        self._scanning = status.scan_state != SCAN_IDLE
+        self._scanning = status.scan_state == SCAN_SCANNING
         self._streaming = bool(status.camera_streaming) if self._camera_available else False
         self._sync_buttons()
 
