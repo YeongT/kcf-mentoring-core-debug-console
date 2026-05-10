@@ -63,9 +63,11 @@ class SessionLogger:
             if not self._truncated:
                 marker = f"{self._timestamp()} EVENT session log reached {self._max_bytes} bytes; further lines suppressed"
                 self._file.write(marker + "\n")
+                self._file.flush()
                 self._bytes_written += len(marker.encode("utf-8")) + 1
                 self._truncated = True
             return
 
         self._file.write(line + "\n")
+        self._file.flush()
         self._bytes_written += encoded_len
