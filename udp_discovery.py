@@ -19,6 +19,20 @@ BUFFER_SIZE = 256
 MAX_DEVICE_NAME_BYTES = 103
 
 
+def _is_usable_ipv4(value: str) -> bool:
+    try:
+        parsed = ip_address(value)
+    except ValueError:
+        return False
+    return (
+        parsed.version == 4
+        and not parsed.is_unspecified
+        and not parsed.is_loopback
+        and not parsed.is_multicast
+        and int(parsed) != 0xFFFFFFFF
+    )
+
+
 @dataclass
 class DiscoveredDevice:
     """A device found via UDP broadcast."""
@@ -68,6 +82,12 @@ class UdpDiscoveryListener:
             self._socket.bind(("0.0.0.0", self._port))
         except OSError as e:
             print(f"[Discovery] Failed to bind UDP port {self._port}: {e}")
+            if self._socket:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
+                self._socket = None
             return False
 
         self._running = True
@@ -176,32 +196,24 @@ class UdpDiscoveryListener:
             return None
 
         name = parts[0].strip()
-        ip = parts[1].strip()
+        ip = parts[1].strip() or source_ip
         if not name or not ip:
             return None
         if len(name.encode("utf-8")) > MAX_DEVICE_NAME_BYTES:
             return None
         if any(ord(ch) < 32 for ch in name):
             return None
-        try:
-            parsed_ip = ip_address(ip)
-        except ValueError:
+        if not _is_usable_ipv4(ip):
             return None
-        if parsed_ip.version != 4:
+        if source_ip and not _is_usable_ipv4(source_ip):
             return None
-        if source_ip:
-            try:
-                if ip_address(source_ip).version != 4:
-                    return None
-            except ValueError:
-                return None
 
         return DiscoveredDevice(name=name, ip_address=ip)
 
     def send_connect(self, device_ip: str, server_ip: str, server_port: int) -> bool:
         """Send CONNECT|server_ip:server_port to a device via UDP unicast."""
         try:
-            if ip_address(device_ip).version != 4 or ip_address(server_ip).version != 4:
+            if not _is_usable_ipv4(device_ip) or not _is_usable_ipv4(server_ip):
                 return False
             if not isinstance(server_port, int) or server_port < 1 or server_port > 65535:
                 return False
@@ -225,4 +237,7 @@ class UdpDiscoveryListener:
     def _notify(self) -> None:
         """Notify callback with current device list."""
         if self.on_devices_changed:
-            self.on_devices_changed(self.devices)
+            try:
+                self.on_devices_changed(self.devices)
+            except Exception as e:
+                print(f"[Discovery] Device callback failed: {e}")

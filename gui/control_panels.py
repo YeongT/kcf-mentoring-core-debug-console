@@ -78,8 +78,10 @@ class OverviewControlPanel(QGroupBox):
     def __init__(self, connection: DeviceConnection):
         super().__init__("Dashboard Controls")
         self._conn = connection
+        self._connected_buttons: list[QPushButton] = []
         self._init_ui()
         self._connect_signals()
+        self._sync_connected_state(False)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -101,6 +103,8 @@ class OverviewControlPanel(QGroupBox):
             button = QPushButton(title)
             button.clicked.connect(callback)
             grid.addWidget(button, idx // 2, idx % 2)
+            if title != "Reset View":
+                self._connected_buttons.append(button)
         layout.addLayout(grid)
 
         self._info = QLabel("Status refresh, reconnect, and generic device actions live here.")
@@ -116,10 +120,26 @@ class OverviewControlPanel(QGroupBox):
         self.setLayout(layout)
 
     def _connect_signals(self) -> None:
+        self._conn.device_connected.connect(self._on_connected)
         self._conn.response_received.connect(self._on_response)
-        self._conn.device_disconnected.connect(self.reset)
+        self._conn.device_disconnected.connect(self._on_disconnected)
+
+    def _on_connected(self, device_name: str, _initial_status: bytes) -> None:
+        self._sync_connected_state(True)
+        self._info.setText(f"Connected to {device_name}")
+
+    def _on_disconnected(self) -> None:
+        self._sync_connected_state(False)
+        self.reset()
+        self._info.setText("Disconnected")
+
+    def _sync_connected_state(self, connected: bool) -> None:
+        for button in self._connected_buttons:
+            button.setEnabled(connected)
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp or resp.cmd_id != CMD_GET_DEVICE_INFO or not resp.ok:
             return
@@ -277,7 +297,7 @@ class CameraControlPanel(QGroupBox):
         if not status:
             return
         self._enabled = status.camera_ok
-        self._streaming = bool(status.camera_streaming)
+        self._streaming = bool(status.camera_streaming) if self._enabled else False
         self._set_controls_enabled(self._enabled)
         self._btn_stream.setText("Stop Stream" if self._streaming else "Start Stream")
         if self._enabled:
@@ -287,8 +307,18 @@ class CameraControlPanel(QGroupBox):
         self.sync_init_settings()
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp:
+            return
+        if resp.cmd_id in {
+            CMD_CAMERA_GET_INFO,
+            CMD_START_STREAM,
+            CMD_STOP_STREAM,
+            CMD_SET_CAMERA_CONFIG,
+            CMD_CAMERA_SET_PARAM,
+        } and not self._enabled:
             return
         if resp.cmd_id == CMD_CAMERA_GET_INFO and resp.ok:
             info = CameraInfo.from_bytes(resp.payload)
@@ -307,7 +337,7 @@ class CameraControlPanel(QGroupBox):
             self.sync_init_settings()
 
     def _toggle_stream(self) -> None:
-        if not self._enabled:
+        if not self._enabled or not self._conn.connected:
             return
         if self._streaming:
             self._conn.send_command(CMD_STOP_STREAM)
@@ -486,7 +516,7 @@ class LidarControlPanel(QGroupBox):
         if not status:
             return
         self._enabled = status.lidar_ok
-        self._scanning = status.scan_state != SCAN_IDLE
+        self._scanning = status.scan_state != SCAN_IDLE if self._enabled else False
         self._set_controls_enabled(self._enabled)
         self._btn_scan.setText("Stop Scan" if self._scanning else "Start Scan")
         if not self._enabled:
@@ -494,8 +524,20 @@ class LidarControlPanel(QGroupBox):
             self._health.setStyleSheet("color: #F44336; font-weight: bold;")
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp:
+            return
+        if resp.cmd_id in {
+            CMD_LIDAR_GET_INFO,
+            CMD_LIDAR_GET_HEALTH,
+            CMD_START_SCAN,
+            CMD_STOP_SCAN,
+            CMD_LIDAR_SET_SCAN_MODE,
+            CMD_LIDAR_RESET,
+            CMD_SET_MOTOR_RPM,
+        } and not self._enabled:
             return
         if resp.cmd_id == CMD_LIDAR_GET_INFO and resp.ok:
             info = LidarInfo.from_bytes(resp.payload)
@@ -516,12 +558,12 @@ class LidarControlPanel(QGroupBox):
             self._btn_scan.setText("Start Scan")
 
     def _toggle_scan(self) -> None:
-        if not self._enabled:
+        if not self._enabled or not self._conn.connected:
             return
         self._conn.send_command(CMD_STOP_SCAN if self._scanning else CMD_START_SCAN)
 
     def _set_rpm(self, val: int | None = None) -> None:
-        if not self._enabled:
+        if not self._enabled or not self._conn.connected:
             return
         if val is not None:
             self._rpm.setValue(val)
@@ -529,7 +571,7 @@ class LidarControlPanel(QGroupBox):
         self.sync_init_settings()
 
     def _set_mode(self, mode: int) -> None:
-        if not self._enabled:
+        if not self._enabled or not self._conn.connected:
             return
         # Sync UI button states
         self._mode_btn_std.setChecked(mode == SCAN_MODE_STANDARD)
@@ -687,6 +729,8 @@ class ImuControlPanel(QGroupBox):
         self._sync_preview_button()
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp:
             return
@@ -758,7 +802,7 @@ class ImuControlPanel(QGroupBox):
             self._btn_toggle_preview.setStyleSheet("")
 
     def _request_time_sync(self) -> None:
-        if not self._supports_time_sync:
+        if not self._conn.connected or not self._supports_time_sync:
             return
         self._last_sync_host_ms = int(time.monotonic() * 1000)
         self._conn.send_command(CMD_TIME_SYNC)

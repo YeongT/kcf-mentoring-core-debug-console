@@ -267,7 +267,7 @@ class DeviceStatus:
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
         data = _bytes_like(data)
-        if len(data) < cls.STRUCT_SIZE:
+        if len(data) != cls.STRUCT_SIZE:
             raise ValueError(f"DeviceStatus needs {cls.STRUCT_SIZE} bytes, got {len(data)}")
         (
             scan_state,
@@ -646,7 +646,10 @@ class CameraInfo:
 def build_command(cmd_id: int, seq: int, payload: bytes = b"") -> bytes:
     """Build a command packet: [0x10] [cmd_id] [seq] [payload...]"""
     payload = _bytes_like(payload, "payload")
-    return bytes([PREFIX_CMD, _uint8(cmd_id, "cmd_id"), _uint8(seq, "seq")]) + payload
+    packet = bytes([PREFIX_CMD, _uint8(cmd_id, "cmd_id"), _uint8(seq, "seq")]) + payload
+    if len(packet) > MAX_PACKET_SIZE:
+        raise ValueError(f"command packet exceeds {MAX_PACKET_SIZE} bytes")
+    return packet
 
 
 def build_set_motor_rpm(seq: int, rpm: int) -> bytes:

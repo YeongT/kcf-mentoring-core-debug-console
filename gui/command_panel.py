@@ -354,7 +354,10 @@ class CommandPanel(QGroupBox):
     def _sync_buttons(self) -> None:
         if not self._conn.connected:
             return
-        if self._scanning:
+        if not self._lidar_available:
+            self._btn_scan.setText("Start Scan")
+            self._btn_scan.setStyleSheet(_STYLE_DISABLED)
+        elif self._scanning:
             self._btn_scan.setText("Stop Scan")
             self._btn_scan.setStyleSheet(_STYLE_SCAN_ON)
         else:
@@ -362,13 +365,55 @@ class CommandPanel(QGroupBox):
             self._btn_scan.setStyleSheet(_STYLE_SCAN_OFF)
         self._btn_scan.setEnabled(self._lidar_available)
 
-        if self._streaming:
+        if not self._camera_available:
+            self._btn_stream.setText("Start Stream")
+            self._btn_stream.setStyleSheet(_STYLE_DISABLED)
+        elif self._streaming:
             self._btn_stream.setText("Stop Stream")
             self._btn_stream.setStyleSheet(_STYLE_STREAM_ON)
         else:
             self._btn_stream.setText("Start Stream")
             self._btn_stream.setStyleSheet(_STYLE_STREAM_OFF)
         self._btn_stream.setEnabled(self._camera_available)
+        self._sync_sensor_controls()
+
+    def _sync_sensor_controls(self) -> None:
+        if not self._conn.connected:
+            return
+        camera_widgets = [
+            self._btn_stream,
+            self._btn_capture,
+            self._btn_apply_camera,
+            self._interval_spin,
+            self._resolution_combo,
+            self._quality_combo,
+            self._brightness_spin,
+            self._contrast_spin,
+            self._saturation_spin,
+            self._effect_combo,
+            self._whitebal_check,
+            self._exposure_check,
+            self._aec_spin,
+            self._hmirror_check,
+            self._vflip_check,
+            self._btn_camera_info,
+        ]
+        lidar_widgets = [
+            self._btn_scan,
+            self._rpm_spin,
+            self._btn_rpm,
+            self._btn_lidar_reset,
+            *self._rpm_presets,
+            *self._scan_mode_buttons,
+        ]
+        for widget in camera_widgets:
+            widget.setEnabled(self._camera_available)
+        for widget in lidar_widgets:
+            widget.setEnabled(self._lidar_available)
+        self._btn_status.setEnabled(True)
+        self._btn_device_info.setEnabled(True)
+        self._btn_reboot.setEnabled(True)
+        self._btn_reconnect.setEnabled(True)
 
     def _set_enabled(self, enabled: bool) -> None:
         for child in self.findChildren(QPushButton):
@@ -382,6 +427,8 @@ class CommandPanel(QGroupBox):
         if not enabled:
             self._btn_stream.setStyleSheet(_STYLE_DISABLED)
             self._btn_scan.setStyleSheet(_STYLE_DISABLED)
+        else:
+            self._sync_buttons()
 
     def set_sidebar_mode(self, sidebar: bool, view: str = "split") -> None:
         if sidebar == self._sidebar_mode and view == self._current_view:
@@ -691,8 +738,14 @@ class CommandPanel(QGroupBox):
         self._conn.init_ack_settings = s
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp:
+            return
+        if resp.cmd_id in _CAMERA_COMMANDS and not self._camera_available:
+            return
+        if resp.cmd_id in _LIDAR_COMMANDS and not self._lidar_available:
             return
 
         # Scan state

@@ -10,6 +10,8 @@ from websockets.asyncio.server import serve, ServerConnection
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from protocol import (
+    MAX_DEVICE_NAME_BYTES,
+    MAX_PACKET_SIZE,
     PREFIX_INIT,
     PREFIX_RES,
     PREFIX_STATUS,
@@ -88,10 +90,7 @@ class DeviceConnection(QObject):
             self.log_message.emit(f"Command build failed: {e}")
             return
         self.raw_message_received.emit("TX", packet)
-        try:
-            asyncio.run_coroutine_threadsafe(self._send(ws, packet), loop)
-        except RuntimeError:
-            pass  # event loop closed
+        self._schedule_send(ws, loop, packet)
 
     def send_raw(self, data: bytes) -> None:
         """Send raw bytes to the device (thread-safe)."""
@@ -103,18 +102,33 @@ class DeviceConnection(QObject):
             self.log_message.emit("Raw send failed: data must be bytes-like")
             return
         data = bytes(data)
+        if len(data) > MAX_PACKET_SIZE:
+            self.log_message.emit(f"Raw send failed: packet exceeds {MAX_PACKET_SIZE} bytes")
+            return
         self.raw_message_received.emit("TX", data)
+        self._schedule_send(ws, loop, data)
+
+    def _schedule_send(
+        self,
+        ws: ServerConnection,
+        loop: asyncio.AbstractEventLoop,
+        data: bytes,
+    ) -> None:
         try:
-            asyncio.run_coroutine_threadsafe(self._send(ws, data), loop)
+            future = asyncio.run_coroutine_threadsafe(self._send(ws, data), loop)
         except RuntimeError:
-            pass  # event loop closed
+            return
+        future.add_done_callback(self._send_done)
+
+    def _send_done(self, future) -> None:
+        try:
+            future.result()
+        except Exception as e:
+            self.log_message.emit(f"Send failed: {e}")
 
     async def _send(self, ws: ServerConnection, data: bytes) -> None:
         if self._ws is ws:
-            try:
-                await ws.send(data)
-            except Exception:
-                pass
+            await ws.send(data)
 
     def disconnect(self) -> None:
         """Close the WebSocket connection from the server side."""
@@ -145,6 +159,7 @@ class DeviceConnection(QObject):
         """Clear connection only if conn_id matches current. Returns True if cleared."""
         if conn_id == self._conn_id:
             self._ws = None
+            self._loop = None
             self._device_name = ""
             return True
         return False  # stale disconnect, ignore
@@ -292,6 +307,16 @@ class WebSocketServer(QObject):
 
     def _validate_device_message(self, message: bytes) -> bool:
         conn = self._connection
+        if not isinstance(message, (bytes, bytearray, memoryview)):
+            conn.log_message.emit("Dropped non-binary device message")
+            return False
+        message = bytes(message)
+        if len(message) == 0:
+            conn.log_message.emit("Dropped empty binary message")
+            return False
+        if len(message) > MAX_PACKET_SIZE:
+            conn.log_message.emit(f"Dropped oversized binary message ({len(message)} bytes)")
+            return False
         prefix = message[0]
         if prefix == PREFIX_RES:
             if parse_response(message):
@@ -321,6 +346,20 @@ class WebSocketServer(QObject):
             conn.log_message.emit(f"Dropped unknown binary prefix 0x{prefix:02X} ({len(message)} bytes)")
         return False
 
+    @staticmethod
+    def _valid_device_name(name: str) -> bool:
+        if not name:
+            return False
+        if len(name.encode("utf-8")) > MAX_DEVICE_NAME_BYTES:
+            return False
+        return not any(ord(ch) < 32 for ch in name)
+
+    async def _close_bad_handshake(self, ws: ServerConnection, reason: str) -> None:
+        try:
+            await ws.close(code=1002, reason=reason[:120])
+        except Exception:
+            pass
+
     async def _handle_connection(self, ws: ServerConnection) -> None:
         conn = self._connection
         loop = asyncio.get_running_loop()
@@ -330,40 +369,53 @@ class WebSocketServer(QObject):
         # First message should be binary INIT
         try:
             first_msg = await asyncio.wait_for(ws.recv(), timeout=10)
-        except (asyncio.TimeoutError, Exception) as e:
+        except asyncio.TimeoutError:
+            conn.log_message.emit("Handshake failed: timed out waiting for INIT")
+            await self._close_bad_handshake(ws, "INIT timeout")
+            return
+        except Exception as e:
             conn.log_message.emit(f"Handshake failed: {e}")
             return
 
         if isinstance(first_msg, bytes) and len(first_msg) < 1:
             conn.log_message.emit("Handshake failed: empty binary message")
+            await self._close_bad_handshake(ws, "empty INIT")
             return
 
         # Parse INIT
         if isinstance(first_msg, bytes) and first_msg[0] == PREFIX_INIT:
+            conn.raw_message_received.emit("RX", first_msg)
             init_msg = parse_init(first_msg)
             if not init_msg:
                 conn.log_message.emit("Handshake failed: malformed INIT")
+                await self._close_bad_handshake(ws, "malformed INIT")
                 return
             if init_msg.protocol_version != PROTOCOL_VERSION:
                 conn.log_message.emit(
                     f"Handshake failed: protocol v{init_msg.protocol_version} != v{PROTOCOL_VERSION}"
                 )
+                await self._close_bad_handshake(ws, "unsupported protocol")
                 return
             device_name = init_msg.device_name
-            conn.raw_message_received.emit("RX", first_msg)
+            if not self._valid_device_name(device_name):
+                conn.log_message.emit("Handshake failed: invalid device name")
+                await self._close_bad_handshake(ws, "invalid device name")
+                return
             conn.log_message.emit(
                 f"INIT from '{device_name}' (proto v{init_msg.protocol_version})"
             )
         elif isinstance(first_msg, str):
             # Fallback: legacy TEXT handshake
             device_name = first_msg.strip()
-            if not device_name:
-                conn.log_message.emit("Handshake failed: empty legacy device name")
+            if not self._valid_device_name(device_name):
+                conn.log_message.emit("Handshake failed: invalid legacy device name")
+                await self._close_bad_handshake(ws, "invalid device name")
                 return
             conn.log_message.emit(f"Legacy handshake from '{device_name}'")
             init_msg = None
         else:
             conn.log_message.emit("Handshake failed: expected binary INIT")
+            await self._close_bad_handshake(ws, "expected binary INIT")
             return
 
         conn_id = conn._set_connection(ws, loop)
@@ -401,7 +453,7 @@ class WebSocketServer(QObject):
         try:
             async for message in ws:
                 try:
-                    if isinstance(message, bytes) and len(message) > 0:
+                    if isinstance(message, bytes):
                         if not self._validate_device_message(message):
                             continue
                         conn.raw_message_received.emit("RX", message)

@@ -41,6 +41,7 @@ class SdCardPanel(QGroupBox):
         self._download_fp = None
         self._entries_count = 0
         self._sd_available = False
+        self._list_in_flight = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(5000)
@@ -121,6 +122,7 @@ class SdCardPanel(QGroupBox):
     def _on_disconnected(self) -> None:
         self._refresh_timer.stop()
         self._sd_available = False
+        self._list_in_flight = False
         self._tree.clear()
         self._entries_count = 0
         self._status.setText("Disconnected")
@@ -140,16 +142,25 @@ class SdCardPanel(QGroupBox):
             self._folder_label.setText(str(self._download_dir))
 
     def request_refresh(self) -> None:
-        if self._conn.connected and self._sd_available:
-            self._status.setText("Loading SD card tree...")
-            self._conn.send_command(CMD_SD_LIST)
-            self._conn.send_command(CMD_GET_STATUS)
+        if not self._conn.connected:
+            self._status.setText("Disconnected")
+            return
+        if not self._sd_available:
+            self._status.setText("SD card not mounted")
+            return
+        if self._list_in_flight:
+            return
+        self._list_in_flight = True
+        self._status.setText("Loading SD card tree...")
+        self._conn.send_command(CMD_SD_LIST)
+        self._conn.send_command(CMD_GET_STATUS)
 
     def update_status(self, status: DeviceStatus) -> None:
         was_available = self._sd_available
         self._sd_available = status.sd_ok and status.sd_total_mb > 0
         if not self._sd_available:
             self._refresh_timer.stop()
+            self._list_in_flight = False
             self._tree.clear()
             self._entries_count = 0
             self._close_download()
@@ -163,17 +174,26 @@ class SdCardPanel(QGroupBox):
             if not was_available and self._conn.connected:
                 if self._auto_refresh.isChecked():
                     self._refresh_timer.start()
+                self.request_refresh()
 
     def _on_response(self, data: bytes) -> None:
+        if not self._conn.connected:
+            return
         resp = parse_response(data)
         if not resp:
             return
         if resp.cmd_id == CMD_SD_LIST:
+            self._list_in_flight = False
+            if not self._sd_available:
+                return
             if not resp.ok:
                 self._status.setText("SD listing failed")
                 return
             self._populate_tree(parse_sd_entries(resp.payload))
         elif resp.cmd_id == CMD_SD_DOWNLOAD:
+            if not self._sd_available:
+                self._close_download()
+                return
             if not resp.ok:
                 self._status.setText("Download request failed")
                 self._close_download()
@@ -206,7 +226,7 @@ class SdCardPanel(QGroupBox):
         self._sync_download_state()
 
     def _download_selected(self) -> None:
-        if not self._sd_available:
+        if not self._conn.connected or not self._sd_available:
             return
         item = self._tree.currentItem()
         if not item:
@@ -217,15 +237,29 @@ class SdCardPanel(QGroupBox):
             return
         self._close_download()
         self._download_path = path
-        self._download_dir.mkdir(parents=True, exist_ok=True)
         target = self._download_dir / Path(path).name
-        self._download_fp = target.open("wb")
+        try:
+            self._download_dir.mkdir(parents=True, exist_ok=True)
+            self._download_fp = target.open("wb")
+        except OSError as exc:
+            self._download_path = None
+            self._status.setText(f"Download open failed: {exc}")
+            self._sync_download_state()
+            return
         self._status.setText(f"Downloading {Path(path).name}...")
         self._conn.send_command(CMD_SD_DOWNLOAD, path.encode("utf-8"))
 
     def _on_sd_chunk(self, data: bytes) -> None:
+        if not self._conn.connected or not self._sd_available:
+            self._close_download()
+            return
         chunk = parse_sd_chunk(data)
-        if not chunk or self._download_fp is None:
+        if not chunk:
+            if self._download_fp is not None:
+                self._status.setText("Download failed: invalid SD chunk")
+                self._close_download()
+            return
+        if self._download_fp is None:
             return
         self._download_fp.seek(chunk.offset)
         self._download_fp.write(chunk.data)
@@ -254,6 +288,7 @@ class SdCardPanel(QGroupBox):
         self._capacity.setText("Capacity: --")
         self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
         self._entries_count = 0
+        self._list_in_flight = False
         self._refresh_timer.stop()
         self._close_download()
         self._sync_download_state()

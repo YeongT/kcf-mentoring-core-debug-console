@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._uptime_timer.timeout.connect(self._tick_uptime)
 
         self._tab_indices: dict[str, int] = {}
+        self._tab_enabled_states: dict[str, bool] = {}
         self._current_status = DeviceStatus()
         self._demo_mode = False
         self._simulator = PrototypeSimulator(self)
@@ -444,6 +445,7 @@ class MainWindow(QMainWindow):
         self._dashboard_status_panel.set_connected(device_name)
         self._imu_panel.set_online(False)
         self._map_controls.set_sensor_state(False, False)
+        self._current_status = DeviceStatus()
         self._connected_at = time.monotonic()
         self._total_bytes = 0
         self._uptime_timer.start()
@@ -457,6 +459,8 @@ class MainWindow(QMainWindow):
     def _on_disconnected(self) -> None:
         if self._demo_mode:
             return
+        self._current_status = DeviceStatus()
+        self._connected_at = 0.0
         self._title.setText("Sensor Debug Console")
         self._title.setStyleSheet("color: #CFD8DC;")
         self._status_panel.set_disconnected()
@@ -473,6 +477,7 @@ class MainWindow(QMainWindow):
         self._map_controls.set_sensor_state(False, False)
         self._sd_panel.reset()
         self._update_sensor_tabs(None)
+        self._sync_tab_meta(None)
         self._show_device_select()
 
     def _on_raw_data(self, direction: str, data: bytes) -> None:
@@ -530,7 +535,7 @@ class MainWindow(QMainWindow):
         resp = parse_response(data)
         if not resp:
             return
-        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) >= DeviceStatus.STRUCT_SIZE:
+        if resp.cmd_id == CMD_GET_STATUS and resp.ok and len(resp.payload) == DeviceStatus.STRUCT_SIZE:
             status = DeviceStatus.from_bytes(resp.payload)
             self._current_status = status
             self._status_panel.update_status(status)
@@ -558,20 +563,21 @@ class MainWindow(QMainWindow):
                 "lidar2d": bool(status and status.lidar_ok),
                 "imu": bool(status and status.imu_ok),
                 "lidar3d": bool(status and status.lidar_ok and status.imu_ok),
-                "sd": bool(status and status.sd_ok),
+                "sd": bool(status and status.sd_ok and status.sd_total_mb > 0),
             }
         for key, tab_index in self._tab_indices.items():
             self._tabs.setTabEnabled(tab_index, states[key])
-        if not states.get("camera"):
+        if self._tab_enabled_states.get("camera") and not states.get("camera"):
             self._camera_panel.reset()
-        if not states.get("lidar2d"):
+        if self._tab_enabled_states.get("lidar2d") and not states.get("lidar2d"):
             self._lidar_panel.reset()
-        if not states.get("imu"):
+        if self._tab_enabled_states.get("imu") and not states.get("imu"):
             self._imu_panel.reset()
-        if not states.get("lidar3d"):
+        if self._tab_enabled_states.get("lidar3d") and not states.get("lidar3d"):
             self._lidar3d_panel.reset()
-        if not states.get("sd"):
+        if self._tab_enabled_states.get("sd") and not states.get("sd"):
             self._sd_panel.reset()
+        self._tab_enabled_states = states
         current_enabled = self._tabs.isTabEnabled(self._tabs.currentIndex())
         if not current_enabled:
             self._tabs.setCurrentIndex(self._tab_indices["dashboard"])
@@ -589,6 +595,10 @@ class MainWindow(QMainWindow):
             meta["imu"] = (
                 "IMU",
                 f'IMU {"online" if status.imu_ok else "offline"} | raw debug + attitude estimation',
+            )
+            meta["sd"] = (
+                "SD Viewer",
+                "Browse and download SD card files" if status.sd_ok and status.sd_total_mb > 0 else "SD card not mounted",
             )
             meta["lidar3d"] = (
                 "LiDAR (3D)",
@@ -770,9 +780,24 @@ class MainWindow(QMainWindow):
         self._btn_devices.setVisible(False)
 
     def _on_server_stopped(self) -> None:
+        self._conn.device_disconnected.emit()
+        self._current_status = DeviceStatus()
+        self._connected_at = 0.0
         self._status_panel.set_disconnected()
+        self._dashboard_status_panel.set_disconnected()
         self._status_timer.stop()
         self._uptime_timer.stop()
+        self._dashboard_camera_panel.reset()
+        self._dashboard_lidar_panel.reset()
+        self._camera_panel.reset()
+        self._lidar_panel.reset()
+        self._imu_panel.reset()
+        self._lidar3d_panel.reset()
+        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
+        self._map_controls.set_sensor_state(False, False)
+        self._sd_panel.reset()
+        self._update_sensor_tabs(None)
+        self._sync_tab_meta(None)
         self._show_device_select()
 
     def _save_settings(self) -> None:
@@ -841,8 +866,9 @@ class MainWindow(QMainWindow):
             self._lidar3d_panel.reset()
             self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
             self._map_controls.set_sensor_state(False, False)
-            self._update_sensor_tabs(None)
-            self._show_device_select()
+        self._update_sensor_tabs(None)
+        self._sync_tab_meta(None)
+        self._show_device_select()
 
     def _on_demo_frame(self, status_data, imu_frame, lidar_frame) -> None:
         if not self._demo_mode:
