@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 import settings
 from protocol import CMD_GET_STATUS, DeviceStatus, parse_camera_frame, parse_imu_frame, parse_lidar_frame, parse_response, parse_status
+from session_logger import SessionLogger
 from udp_discovery import UdpDiscoveryListener
 from ws_server import DeviceConnection, WebSocketServer
 
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self._current_status = DeviceStatus()
         self._demo_mode = False
         self._simulator = PrototypeSimulator(self)
+        self._session_logger = SessionLogger()
 
         self._create_arrow_icons()
         self._init_ui()
@@ -386,8 +388,10 @@ class MainWindow(QMainWindow):
         self._conn.imu_frame_received.connect(self._on_imu_frame)
         self._conn.response_received.connect(self._on_response)
         self._conn.raw_message_received.connect(self._log_panel.log_raw)
+        self._conn.raw_message_received.connect(self._session_logger.log_raw)
         self._conn.raw_message_received.connect(self._on_raw_data)
         self._conn.log_message.connect(self._log_panel.log_text)
+        self._conn.log_message.connect(self._session_logger.log_text)
         self._simulator.frame_ready.connect(self._on_demo_frame)
         self._simulator.started.connect(self._on_demo_started)
         self._simulator.stopped.connect(self._on_demo_stopped)
@@ -400,6 +404,8 @@ class MainWindow(QMainWindow):
             self._discovery_timer.setInterval(1500)
             self._discovery_timer.timeout.connect(self._poll_discovery)
             self._discovery_timer.start()
+
+        self._log_panel.log_text(f"Session log: {self._session_logger.path}")
 
     def _poll_discovery(self) -> None:
         if self._discovery:
@@ -771,6 +777,7 @@ class MainWindow(QMainWindow):
             self._status_timer.stop()
             self._uptime_timer.stop()
             self._server.stop()
+            self._session_logger.close()
             event.accept()
         else:
             event.ignore()
