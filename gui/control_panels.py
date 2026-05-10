@@ -1,10 +1,9 @@
-"""Compact control panels for dashboard and sensor-specific tabs."""
+﻿"""Compact control panels for dashboard and sensor-specific tabs."""
 
 from __future__ import annotations
 
 import struct
 import time
-from typing import Callable
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
@@ -63,7 +62,6 @@ from protocol import (
     LidarHealth,
     LidarInfo,
     ProtocolInfo,
-    SCAN_IDLE,
     SCAN_SCANNING,
     SCAN_MODE_EXPRESS,
     SCAN_MODE_STANDARD,
@@ -71,6 +69,7 @@ from protocol import (
     parse_response,
     parse_status,
 )
+from gui.mapping_control_panel import MappingControlPanel
 from ws_server import DeviceConnection
 
 
@@ -858,66 +857,3 @@ class ImuControlPanel(QGroupBox):
         self._labels["position"].setText(
             f'{snapshot["position"][0]:+.2f}, {snapshot["position"][1]:+.2f}, {snapshot["position"][2]:+.2f} m'
         )
-
-
-class MappingControlPanel(QGroupBox):
-    def __init__(self, map_panel, toggle_demo: Callable[[], None]):
-        super().__init__("2.5D Mapping")
-        self._map_panel = map_panel
-        self._toggle_demo = toggle_demo
-        self._demo_running = False
-        self._init_ui()
-
-    def _init_ui(self) -> None:
-        layout = QVBoxLayout()
-        layout.setSpacing(8)
-        layout.setContentsMargins(10, 14, 10, 10)
-
-        self._status = QLabel("Waiting for fusion input")
-        self._status.setFont(QFont("Consolas", 10))
-        self._status.setStyleSheet("color: #FF9800; font-weight: bold;")
-        layout.addWidget(self._status)
-
-        grid = QGridLayout()
-        self._labels: dict[str, QLabel] = {}
-        for row, (title, key) in enumerate((("Frames", "frames"), ("Yaw", "yaw"), ("Window", "window"))):
-            label = QLabel(title)
-            label.setStyleSheet("color: #78909C;")
-            value = QLabel("--")
-            value.setFont(QFont("Consolas", 9))
-            value.setStyleSheet("color: #CFD8DC;")
-            grid.addWidget(label, row, 0)
-            grid.addWidget(value, row, 1)
-            self._labels[key] = value
-        layout.addLayout(grid)
-
-        self._btn_demo = QPushButton("Start Demo")
-        self._btn_demo.clicked.connect(self._toggle_demo)
-        layout.addWidget(self._btn_demo)
-
-        self._btn_clear = QPushButton("Clear Map")
-        self._btn_clear.clicked.connect(self._map_panel.clear_map)
-        layout.addWidget(self._btn_clear)
-
-        layout.addStretch()
-        self.setLayout(layout)
-
-    def set_demo_running(self, running: bool) -> None:
-        self._demo_running = running
-        self._btn_demo.setText("Stop Demo" if running else "Start Demo")
-
-    def set_sensor_state(self, lidar_ok: bool, imu_ok: bool) -> None:
-        if lidar_ok and imu_ok:
-            self._status.setText("Fusion input live")
-            self._status.setStyleSheet("color: #4CAF50; font-weight: bold;")
-        elif lidar_ok or imu_ok:
-            self._status.setText("Partial input only")
-            self._status.setStyleSheet("color: #FF9800; font-weight: bold;")
-        else:
-            self._status.setText("Waiting for fusion input")
-            self._status.setStyleSheet("color: #FF9800; font-weight: bold;")
-
-    def update_snapshot(self, snapshot: dict) -> None:
-        self._labels["frames"].setText(str(snapshot["frames"]))
-        self._labels["yaw"].setText(f'{snapshot["yaw_deg"]:.1f} deg')
-        self._labels["window"].setText(f'{snapshot["horizon_s"]:.1f} s')

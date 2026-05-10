@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self._imu_panel = ImuPanel()
         self._imu_controls = ImuControlPanel(self._conn, self._imu_panel)
         self._lidar3d_panel = Lidar3DPanel()
-        self._map_controls = MappingControlPanel(self._lidar3d_panel, self._toggle_demo)
+        self._map_controls = MappingControlPanel(self._conn, self._lidar3d_panel, self._toggle_demo)
         self._sd_panel = SdCardPanel(self._conn)
         self._log_panel = LogPanel()
 

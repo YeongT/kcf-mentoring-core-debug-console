@@ -24,6 +24,7 @@ class PerspectiveRoomCanvas(QWidget):
     def __init__(self):
         super().__init__()
         self._history = deque(maxlen=90)  # (stamp, world_points, pose_xy, yaw_deg)
+        self._horizon_s = 8.0
         self.setMinimumHeight(340)
         self.setStyleSheet("background-color: #08111C; border: 1px solid #203042; border-radius: 8px;")
 
@@ -33,6 +34,10 @@ class PerspectiveRoomCanvas(QWidget):
 
     def clear_map(self) -> None:
         self._history.clear()
+        self.update()
+
+    def set_horizon(self, seconds: float) -> None:
+        self._horizon_s = max(2.0, min(30.0, seconds))
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -71,9 +76,9 @@ class PerspectiveRoomCanvas(QWidget):
         now = time.monotonic()
         for stamp, points, pose_xy, yaw_deg in self._history:
             age = now - stamp
-            if age > 8.0:
+            if age > self._horizon_s:
                 continue
-            fade = max(0.1, 1.0 - age / 8.0)
+            fade = max(0.1, 1.0 - age / self._horizon_s)
             scale = 0.80 + age * 0.25
             for x_m, y_m in points:
                 depth = max(0.6, y_m + 3.5)
@@ -102,24 +107,32 @@ class TopDownMapCanvas(QWidget):
         self._poses = deque(maxlen=500)
         self._yaw_deg = 0.0
         self._bounds = [-2.0, 2.0, -2.0, 2.0]  # min_x, max_x, min_y, max_y
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(160)
         self.setStyleSheet("background-color: #08111C; border: 1px solid #203042; border-radius: 8px;")
 
     def update_frame(self, world_points: list[tuple[float, float]], pose_xy: tuple[float, float], yaw_deg: float) -> None:
         for point in world_points:
             self._points.append(point)
             # Incrementally update bounds to avoid O(N) min/max in paintEvent
-            if point[0] < self._bounds[0]: self._bounds[0] = point[0]
-            elif point[0] > self._bounds[1]: self._bounds[1] = point[0]
-            if point[1] < self._bounds[2]: self._bounds[2] = point[1]
-            elif point[1] > self._bounds[3]: self._bounds[3] = point[1]
-            
+            if point[0] < self._bounds[0]:
+                self._bounds[0] = point[0]
+            elif point[0] > self._bounds[1]:
+                self._bounds[1] = point[0]
+            if point[1] < self._bounds[2]:
+                self._bounds[2] = point[1]
+            elif point[1] > self._bounds[3]:
+                self._bounds[3] = point[1]
+
         self._poses.append(pose_xy)
-        if pose_xy[0] < self._bounds[0]: self._bounds[0] = pose_xy[0]
-        elif pose_xy[0] > self._bounds[1]: self._bounds[1] = pose_xy[0]
-        if pose_xy[1] < self._bounds[2]: self._bounds[2] = pose_xy[1]
-        elif pose_xy[1] > self._bounds[3]: self._bounds[3] = pose_xy[1]
-        
+        if pose_xy[0] < self._bounds[0]:
+            self._bounds[0] = pose_xy[0]
+        elif pose_xy[0] > self._bounds[1]:
+            self._bounds[1] = pose_xy[0]
+        if pose_xy[1] < self._bounds[2]:
+            self._bounds[2] = pose_xy[1]
+        elif pose_xy[1] > self._bounds[3]:
+            self._bounds[3] = pose_xy[1]
+
         self._yaw_deg = yaw_deg
         self.update()
 
@@ -239,7 +252,7 @@ class Lidar3DPanel(QGroupBox):
         layout.setSpacing(8)
         layout.setContentsMargins(8, 10, 8, 8)
         layout.addWidget(self._perspective, 5)
-        layout.addWidget(self._topdown, 3)
+        layout.addWidget(self._topdown, 4)
         layout.addWidget(self._hud, 0)
         layout.addWidget(self._caption, 0)
         self.setLayout(layout)
@@ -267,7 +280,7 @@ class Lidar3DPanel(QGroupBox):
         # Rotation matrix for 2D (Yaw only)
         cos_y = math.cos(yaw_rad)
         sin_y = math.sin(yaw_rad)
-        
+
         for point in frame.points:
             if point.distance_mm <= 0:
                 continue
@@ -275,9 +288,9 @@ class Lidar3DPanel(QGroupBox):
             local_angle = math.radians(point.angle_deg)
             local_x = math.cos(local_angle) * (point.distance_mm / 1000.0)
             local_y = math.sin(local_angle) * (point.distance_mm / 1000.0)
-            
+
             # Rotate local point to world coordinates using device orientation (Yaw)
-            # Standard 2D rotation: 
+            # Standard 2D rotation:
             # x' = x*cos - y*sin
             # y' = x*sin + y*cos
             world_x = self._pose_xy[0] + (local_x * cos_y - local_y * sin_y)
@@ -301,6 +314,11 @@ class Lidar3DPanel(QGroupBox):
 
     def clear_map(self) -> None:
         self.reset()
+
+    def set_horizon(self, seconds: float) -> None:
+        self._horizon_s = max(2.0, min(30.0, seconds))
+        self._perspective.set_horizon(self._horizon_s)
+        self._sync_hud()
 
     def get_snapshot(self) -> dict:
         return {
