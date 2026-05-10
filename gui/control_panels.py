@@ -41,6 +41,7 @@ from protocol import (
     CMD_GET_DEVICE_INFO,
     CMD_GET_PROTOCOL_INFO,
     CMD_GET_STATUS,
+    CMD_IMU_CALIBRATE,
     CMD_IMU_SET_PREVIEW,
     CMD_LIDAR_GET_HEALTH,
     CMD_LIDAR_GET_INFO,
@@ -655,6 +656,9 @@ class ImuControlPanel(QGroupBox):
         self._btn_zero_yaw = QPushButton("Zero Yaw")
         self._btn_zero_yaw.clicked.connect(lambda _: self._imu_panel.zero_yaw())
         action_row.addWidget(self._btn_zero_yaw)
+        self._btn_level_cal = QPushButton("Level Cal")
+        self._btn_level_cal.clicked.connect(lambda _: self._request_level_cal())
+        action_row.addWidget(self._btn_level_cal)
         self._btn_clear_trail = QPushButton("Clear Trail")
         self._btn_clear_trail.clicked.connect(lambda _: self._imu_panel.clear_trail())
         action_row.addWidget(self._btn_clear_trail)
@@ -780,6 +784,13 @@ class ImuControlPanel(QGroupBox):
                 self._sync_preview_button()
                 self._preview_interval.setValue(max(20, min(1000, interval)))
                 self._protocol_info.setText(f"IMU preview {'ON' if enabled else 'OFF'} @ {interval} ms")
+        elif resp.cmd_id == CMD_IMU_CALIBRATE:
+            self._sync_preview_button()
+            if not resp.ok:
+                self._protocol_info.setText(f"Level calibration failed: {resp.result_name}")
+                return
+            self._imu_panel.reset_filter()
+            self._protocol_info.setText("Level calibration complete")
 
     def _toggle_preview(self) -> None:
         if not (self._imu_available and self._supports_imu_preview_ctrl):
@@ -793,6 +804,7 @@ class ImuControlPanel(QGroupBox):
         enabled = self._conn.connected and self._imu_available and self._supports_imu_preview_ctrl
         self._preview_interval.setEnabled(enabled)
         self._btn_toggle_preview.setEnabled(enabled)
+        self._btn_level_cal.setEnabled(self._conn.connected and self._imu_available)
         self._btn_toggle_preview.setText("Stop Monitor" if self._is_previewing else "Start Monitor")
         if self._is_previewing:
             self._btn_toggle_preview.setStyleSheet(
@@ -808,14 +820,23 @@ class ImuControlPanel(QGroupBox):
         self._last_sync_host_ms = int(time.monotonic() * 1000)
         self._conn.send_command(CMD_TIME_SYNC)
 
+    def _request_level_cal(self) -> None:
+        if not self._conn.connected or not self._imu_available:
+            return
+        self._btn_level_cal.setEnabled(False)
+        self._protocol_info.setText("Keep the device level and still...")
+        self._conn.send_command(CMD_IMU_CALIBRATE)
+
     def _set_protocol_controls_enabled(self, enabled: bool) -> None:
         self._btn_protocol.setEnabled(enabled)
         self._btn_time_sync.setEnabled(enabled and self._supports_time_sync)
+        self._btn_level_cal.setEnabled(enabled and self._imu_available)
         if enabled:
             self._sync_preview_button()
         else:
             self._preview_interval.setEnabled(False)
             self._btn_toggle_preview.setEnabled(False)
+            self._btn_level_cal.setEnabled(False)
 
     def _update_state(self, online: bool, message: str) -> None:
         # Status header removed to clean up duplicate UI. Logic preserved for future needs if any.
