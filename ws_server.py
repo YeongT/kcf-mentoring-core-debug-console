@@ -3,6 +3,7 @@
 import asyncio
 import socket
 import threading
+import time
 from typing import Optional
 
 from websockets.asyncio.server import serve, ServerConnection
@@ -33,8 +34,8 @@ from protocol import (
 )
 
 DEVICE_MESSAGE_TIMEOUT_S = 20.0
-PING_INTERVAL_S = 10.0
-PING_TIMEOUT_S = 10.0
+PING_INTERVAL_S = 30.0
+PING_TIMEOUT_S = 30.0
 
 
 class DeviceConnection(QObject):
@@ -458,11 +459,13 @@ class WebSocketServer(QObject):
 
         conn.device_connected.emit(device_name, initial_status)
         conn.log_message.emit(f"Device connected: {device_name}")
+        last_traffic_timeout_log = 0.0
 
         try:
             while True:
                 try:
                     message = await asyncio.wait_for(ws.recv(), timeout=DEVICE_MESSAGE_TIMEOUT_S)
+                    last_traffic_timeout_log = 0.0
                     if isinstance(message, bytes):
                         if not self._validate_device_message(message):
                             continue
@@ -483,9 +486,13 @@ class WebSocketServer(QObject):
                     elif isinstance(message, str):
                         conn.log_message.emit(f"TEXT: {message}")
                 except asyncio.TimeoutError:
-                    conn.log_message.emit("Device connection timed out waiting for protocol traffic")
-                    await self._close_bad_handshake(ws, "device traffic timeout")
-                    break
+                    now = time.monotonic()
+                    if now - last_traffic_timeout_log >= DEVICE_MESSAGE_TIMEOUT_S:
+                        conn.log_message.emit(
+                            f"No protocol traffic for {int(DEVICE_MESSAGE_TIMEOUT_S)}s; keeping WebSocket open"
+                        )
+                        last_traffic_timeout_log = now
+                    continue
                 except (asyncio.CancelledError, GeneratorExit):
                     break
                 except ConnectionClosed:

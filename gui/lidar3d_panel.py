@@ -239,7 +239,10 @@ class Lidar3DPanel(QGroupBox):
         self._perspective = PerspectiveRoomCanvas()
         self._topdown = TopDownMapCanvas()
         self._hud = HudStrip()
-        self._caption = QLabel("LiDAR points are rotated by IMU yaw and accumulated into a room-like debugging view.")
+        self._caption = QLabel(
+            "LiDAR points are rotated by mount-corrected IMU yaw. Translation is locked because raw accelerometer "
+            "integration drifts too quickly for room-map accumulation."
+        )
         self._caption.setStyleSheet("color: #8AA0B6;")
         self._caption.setWordWrap(True)
 
@@ -270,7 +273,10 @@ class Lidar3DPanel(QGroupBox):
         self._sync_hud()
 
     def set_pose(self, x_m: float, y_m: float) -> None:
-        self._pose_xy = (x_m, y_m)
+        # Accelerometer double-integration is only useful as a short motion cue.
+        # Feeding that drift into the room map makes walls smear across the view,
+        # especially while the IMU mount correction is being calibrated.
+        self._pose_xy = (0.0, 0.0)
         self._sync_hud()
 
     def update_lidar_frame(self, frame: LidarFrame) -> None:

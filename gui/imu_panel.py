@@ -13,6 +13,12 @@ from PyQt6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushBu
 from protocol import ImuFrame
 
 
+MOUNT_ROLL_SIGN = -1.0
+MOUNT_PITCH_SIGN = 1.0
+MOUNT_YAW_SIGN = -1.0
+MOUNT_DESCRIPTION = "Upside-down IMU mount"
+
+
 def _metric_label(title: str) -> tuple[QLabel, QLabel]:
     title_label = QLabel(title)
     title_label.setStyleSheet("color: #78909C; font-size: 11px;")
@@ -199,8 +205,11 @@ class TrajectoryCanvas(QWidget):
 
         painter.setPen(QColor("#7F8C99"))
         painter.setFont(QFont("Consolas", 8))
-        painter.drawText(rect.left(), rect.top() - 2, "Integrated trajectory / heading")
+        painter.drawText(rect.left(), rect.top() - 2, "Relative XY trail / heading")
+        painter.drawText(rect.right() - 10, rect.center().y() - 4, "X")
+        painter.drawText(rect.center().x() + 4, rect.top() + 10, "Y")
 
+        current = QPointF(float(rect.center().x()), float(rect.center().y()))
         if self._trail:
             max_abs = max(max(abs(x), abs(y)) for x, y in self._trail)
             scale = (min(rect.width(), rect.height()) * 0.42) / max(0.15, max_abs)
@@ -213,16 +222,16 @@ class TrajectoryCanvas(QWidget):
                 alpha = int(40 + 215 * idx / max(1, len(points) - 1))
                 painter.setPen(QPen(QColor(79, 195, 247, alpha), 1.5))
                 painter.drawLine(start, end)
+            current = points[-1]
 
-        center = QPointF(float(rect.center().x()), float(rect.center().y()))
         painter.setPen(QPen(QColor("#FF7043"), 2))
         painter.setBrush(QColor("#FF7043"))
-        painter.drawEllipse(center, 4.0, 4.0)
+        painter.drawEllipse(current, 4.0, 4.0)
 
         heading_len = min(rect.width(), rect.height()) * 0.18
         yaw_rad = math.radians(self._yaw_deg)
-        end = QPointF(center.x() + math.cos(yaw_rad) * heading_len, center.y() - math.sin(yaw_rad) * heading_len)
-        painter.drawLine(center, end)
+        end = QPointF(current.x() + math.sin(yaw_rad) * heading_len, current.y() - math.cos(yaw_rad) * heading_len)
+        painter.drawLine(current, end)
         painter.drawEllipse(end, 3.0, 3.0)
         painter.end()
 
@@ -243,6 +252,9 @@ class ImuPanel(QGroupBox):
         self._roll = 0.0
         self._pitch = 0.0
         self._yaw = 0.0
+        self._level_roll = 0.0
+        self._level_pitch = 0.0
+        self._level_yaw = 0.0
         self._velocity = [0.0, 0.0, 0.0]
         self._position = [0.0, 0.0, 0.0]
         self._trail = deque(maxlen=320)
@@ -251,6 +263,14 @@ class ImuPanel(QGroupBox):
         self._latest_accel = (0.0, 0.0, 0.0)
         self._latest_gyro = (0.0, 0.0, 0.0)
         self._online = False
+        self._sensor_available = False
+        self._auto_calibrating = False
+        self._calibration_needed = 160
+        self._calibration_seen = 0
+        self._calibration_accel_sum = [0.0, 0.0, 0.0]
+        self._calibration_gyro_sum = [0.0, 0.0, 0.0]
+        self._gyro_bias = (0.0, 0.0, 0.0)
+        self._world_accel_bias = (0.0, 0.0, 0.0)
 
         self._age_timer = QTimer(self)
         self._age_timer.setInterval(250)
@@ -259,6 +279,35 @@ class ImuPanel(QGroupBox):
 
         self._init_ui()
         self._emit_state()
+
+    def begin_monitor_session(self) -> None:
+        self.reset()
+        self._sensor_available = True
+        self._auto_calibrating = True
+        self._calibration_seen = 0
+        self._calibration_accel_sum = [0.0, 0.0, 0.0]
+        self._calibration_gyro_sum = [0.0, 0.0, 0.0]
+        self._gyro_bias = (0.0, 0.0, 0.0)
+        self._world_accel_bias = (0.0, 0.0, 0.0)
+        self._level_roll = 0.0
+        self._level_pitch = 0.0
+        self._level_yaw = 0.0
+        self._card_state.set_value("CAL", "#4FC3F7")
+        self._card_mode.set_value("Auto baseline", "#4FC3F7")
+        self._emit_state()
+
+    def is_monitoring(self) -> bool:
+        return self._online or self._auto_calibrating
+
+    def set_available(self, available: bool) -> None:
+        self._sensor_available = available
+        if not available:
+            self._online = False
+            self._auto_calibrating = False
+            self._card_state.set_value("OFF", "#F44336")
+            self._emit_state()
+        elif not self._online and not self._auto_calibrating:
+            self._card_state.set_value("WAIT", "#FF9800")
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -295,7 +344,7 @@ class ImuPanel(QGroupBox):
             ("Roll", "roll"),
             ("Pitch", "pitch"),
             ("Yaw", "yaw"),
-            ("Position", "position"),
+            ("Rel XY", "position"),
             ("Axes", "axes"),
         ]
         for idx, (title, key) in enumerate(items):
@@ -321,9 +370,14 @@ class ImuPanel(QGroupBox):
     def set_online(self, online: bool) -> None:
         self._online = online
         if online:
-            self._card_state.set_value("LIVE", "#4CAF50")
+            if self._auto_calibrating:
+                self._card_state.set_value("CAL", "#4FC3F7")
+            else:
+                self._card_state.set_value("LIVE", "#4CAF50")
         else:
-            self._card_state.set_value("WAIT", "#FF9800")
+            text = "WAIT" if self._sensor_available else "OFF"
+            color = "#FF9800" if self._sensor_available else "#F44336"
+            self._card_state.set_value(text, color)
             self._card_age.set_value("--", "#90A4AE")
             self._card_rate.set_value("--", "#90A4AE")
         self._emit_state()
@@ -356,7 +410,21 @@ class ImuPanel(QGroupBox):
                 frame_dt_count += 1
 
             ax, ay, az = sample.accel_x_g, sample.accel_y_g, sample.accel_z_g
-            gx, gy, gz = sample.gyro_x_dps, sample.gyro_y_dps, sample.gyro_z_dps
+            raw_gx, raw_gy, raw_gz = sample.gyro_x_dps, sample.gyro_y_dps, sample.gyro_z_dps
+
+            if self._auto_calibrating:
+                self._accumulate_calibration(ax, ay, az, raw_gx, raw_gy, raw_gz)
+                continue
+
+            gx = raw_gx - self._gyro_bias[0]
+            gy = raw_gy - self._gyro_bias[1]
+            gz = raw_gz - self._gyro_bias[2]
+            if abs(gx) < 0.08:
+                gx = 0.0
+            if abs(gy) < 0.08:
+                gy = 0.0
+            if abs(gz) < 0.08:
+                gz = 0.0
             self._latest_accel = (ax, ay, az)
             self._latest_gyro = (gx, gy, gz)
 
@@ -375,7 +443,7 @@ class ImuPanel(QGroupBox):
                 self._pitch = alpha * (self._pitch + math.radians(gy) * dt) + (1 - alpha) * pitch_acc
                 self._yaw += math.radians(gz) * dt
 
-                # --- Position Integration (Experimental) ---
+                # --- Relative Motion Cue ---
                 cr, sr = math.cos(self._roll), math.sin(self._roll)
                 cp, sp = math.cos(self._pitch), math.sin(self._pitch)
                 cy, sy = math.cos(self._yaw), math.sin(self._yaw)
@@ -391,27 +459,47 @@ class ImuPanel(QGroupBox):
                 world_ax = rot[0][0] * ax + rot[0][1] * ay + rot[0][2] * az
                 world_ay = rot[1][0] * ax + rot[1][1] * ay + rot[1][2] * az
                 world_az = rot[2][0] * ax + rot[2][1] * ay + rot[2][2] * az - 1.0
+                world_ax -= self._world_accel_bias[0]
+                world_ay -= self._world_accel_bias[1]
+                world_az -= self._world_accel_bias[2]
 
-                # Zero-velocity update / thresholding to reduce drift
-                acc_threshold = 0.05 # G
-                if abs(world_ax) < acc_threshold: world_ax = 0
-                if abs(world_ay) < acc_threshold: world_ay = 0
-                
-                # Damping should be high for drift reduction if not moving
-                damping = math.pow(0.98, dt * 100) # Time-dependent damping
-                for idx, world_acc in enumerate((world_ax, world_ay, world_az)):
-                    self._velocity[idx] = (self._velocity[idx] + world_acc * 9.80665 * dt) * damping
-                    self._position[idx] += self._velocity[idx] * dt
+                # This is intentionally not metric odometry. It is a short-term
+                # motion cue for "which way did it move relative to start?"
+                acc_threshold = 0.035
+                if abs(world_ax) < acc_threshold:
+                    world_ax = 0.0
+                if abs(world_ay) < acc_threshold:
+                    world_ay = 0.0
+
+                gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+                stationary = world_ax == 0.0 and world_ay == 0.0 and gyro_mag < 1.5
+                velocity_decay = math.pow(0.72 if stationary else 0.90, dt * 100)
+                position_decay = math.pow(0.997 if stationary else 0.999, dt * 100)
+                motion_gain = 1.4
+                for idx, world_acc in enumerate((world_ax, world_ay)):
+                    self._velocity[idx] = (self._velocity[idx] + world_acc * motion_gain * dt) * velocity_decay
+                    self._position[idx] = (self._position[idx] + self._velocity[idx] * dt) * position_decay
+                    self._position[idx] = max(-5.0, min(5.0, self._position[idx]))
+                self._velocity[2] = 0.0
+                self._position[2] = 0.0
 
                 self._trail.append((self._position[0], self._position[1]))
 
         if frame_dt_count > 0:
             self._sample_rate_hz = 1.0 / (frame_dt_total / frame_dt_count)
 
+        if self._auto_calibrating:
+            self._card_rate.set_value(f"{self._sample_rate_hz:.1f} Hz", "#81C784")
+            self._card_age.set_value("0 ms", "#4CAF50")
+            self._labels["samples"].setText(str(self._sample_count))
+            self._labels["axes"].setText("Building baseline")
+            self.metrics_updated.emit(self.get_snapshot())
+            return
+
         roll_deg, pitch_deg, yaw_deg = self.get_orientation_deg()
         self._attitude.update_orientation(roll_deg, pitch_deg, yaw_deg)
         self._card_rate.set_value(f"{self._sample_rate_hz:.1f} Hz", "#81C784")
-        self._card_mode.set_value("Complementary", "#4FC3F7")
+        self._card_mode.set_value("Complementary + mount", "#4FC3F7")
         self._refresh_age()
 
         accel_mag = math.sqrt(sum(v * v for v in self._latest_accel))
@@ -422,13 +510,61 @@ class ImuPanel(QGroupBox):
         self._labels["roll"].setText(f"{roll_deg:.1f} deg")
         self._labels["pitch"].setText(f"{pitch_deg:.1f} deg")
         self._labels["yaw"].setText(f"{yaw_deg:.1f} deg")
-        self._labels["position"].setText(f"{self._position[0]:.2f}, {self._position[1]:.2f}, {self._position[2]:.2f} m")
+        self._labels["position"].setText(f"{self._position[0]:+.2f}, {self._position[1]:+.2f} rel")
         self._labels["axes"].setText(
+            f"{MOUNT_DESCRIPTION} | "
             f"A {self._latest_accel[0]:+.2f} {self._latest_accel[1]:+.2f} {self._latest_accel[2]:+.2f} | "
             f"G {self._latest_gyro[0]:+.1f} {self._latest_gyro[1]:+.1f} {self._latest_gyro[2]:+.1f}"
         )
         self._trail_canvas.update_state(self._trail, yaw_deg)
         self.metrics_updated.emit(self.get_snapshot())
+
+    def _accumulate_calibration(self, ax: float, ay: float, az: float, gx: float, gy: float, gz: float) -> None:
+        self._calibration_accel_sum[0] += ax
+        self._calibration_accel_sum[1] += ay
+        self._calibration_accel_sum[2] += az
+        self._calibration_gyro_sum[0] += gx
+        self._calibration_gyro_sum[1] += gy
+        self._calibration_gyro_sum[2] += gz
+        self._calibration_seen += 1
+
+        if self._calibration_seen < self._calibration_needed:
+            return
+
+        inv = 1.0 / self._calibration_seen
+        avg_ax, avg_ay, avg_az = (v * inv for v in self._calibration_accel_sum)
+        self._gyro_bias = tuple(v * inv for v in self._calibration_gyro_sum)
+
+        self._roll = math.atan2(avg_ay, avg_az if abs(avg_az) > 1e-6 else 1e-6)
+        self._pitch = math.atan2(-avg_ax, math.sqrt(avg_ay * avg_ay + avg_az * avg_az))
+        self._yaw = 0.0
+        self._level_roll = self._roll
+        self._level_pitch = self._pitch
+        self._level_yaw = self._yaw
+        self._velocity = [0.0, 0.0, 0.0]
+        self._position = [0.0, 0.0, 0.0]
+        self._trail.clear()
+        self._trail.append((0.0, 0.0))
+        self._last_timestamp_us = None
+
+        cr, sr = math.cos(self._roll), math.sin(self._roll)
+        cp, sp = math.cos(self._pitch), math.sin(self._pitch)
+        rot = (
+            (cp, sp * sr, sp * cr),
+            (0.0, cr, -sr),
+            (-sp, cp * sr, cp * cr),
+        )
+        self._world_accel_bias = (
+            rot[0][0] * avg_ax + rot[0][1] * avg_ay + rot[0][2] * avg_az,
+            rot[1][0] * avg_ax + rot[1][1] * avg_ay + rot[1][2] * avg_az,
+            rot[2][0] * avg_ax + rot[2][1] * avg_ay + rot[2][2] * avg_az - 1.0,
+        )
+
+        self._auto_calibrating = False
+        self.set_online(True)
+        self._card_mode.set_value("Baseline locked", "#4FC3F7")
+        self._attitude.update_orientation(*self.get_orientation_deg())
+        self._trail_canvas.update_state(self._trail, 0.0)
 
     def _refresh_age(self) -> None:
         if self._last_wall_time is None:
@@ -437,13 +573,22 @@ class ImuPanel(QGroupBox):
         age_ms = int((time.monotonic() - self._last_wall_time) * 1000)
         color = "#4CAF50" if age_ms < 200 else "#FF9800" if age_ms < 1000 else "#F44336"
         self._card_age.set_value(f"{age_ms} ms", color)
+        if self._online and age_ms > 1500:
+            self._online = False
+            self._card_state.set_value("WAIT", "#FF9800")
+            self._emit_state()
 
     def _emit_state(self) -> None:
-        message = "IMU streaming active" if self._online else "Waiting for preview packets..."
+        if self._auto_calibrating:
+            message = "IMU baseline calibration"
+        elif self._online:
+            message = "IMU streaming active"
+        else:
+            message = "Waiting for preview packets..."
         self.state_changed.emit(self._online, message)
 
     def zero_yaw(self) -> None:
-        self._yaw = 0.0
+        self._level_yaw = self._yaw
         self._velocity[2] = 0.0
         self._attitude.update_orientation(*self.get_orientation_deg())
         self._trail_canvas.update_state(self._trail, 0.0)
@@ -454,23 +599,36 @@ class ImuPanel(QGroupBox):
         self._position = [0.0, 0.0, 0.0]
         self._velocity = [0.0, 0.0, 0.0]
         self._trail_canvas.clear_trail()
-        self._labels["position"].setText("0.00, 0.00, 0.00 m")
+        self._labels["position"].setText("+0.00, +0.00 rel")
         self.metrics_updated.emit(self.get_snapshot())
 
     def reset_filter(self) -> None:
-        self._roll = 0.0
-        self._pitch = 0.0
-        self._yaw = 0.0
+        self._level_roll = self._roll
+        self._level_pitch = self._pitch
+        self._level_yaw = self._yaw
         self._velocity = [0.0, 0.0, 0.0]
         self._position = [0.0, 0.0, 0.0]
         self._trail.clear()
-        self._attitude.reset()
+        self._attitude.update_orientation(0.0, 0.0, 0.0)
         self._trail_canvas.reset()
-        self._labels["position"].setText("0.00, 0.00, 0.00 m")
+        self._labels["position"].setText("+0.00, +0.00 rel")
         self.metrics_updated.emit(self.get_snapshot())
 
     def get_orientation_deg(self) -> tuple[float, float, float]:
-        return math.degrees(self._roll), math.degrees(self._pitch), math.degrees(self._yaw)
+        return (
+            self._angle_delta_deg(self._roll, self._level_roll) * MOUNT_ROLL_SIGN,
+            self._angle_delta_deg(self._pitch, self._level_pitch) * MOUNT_PITCH_SIGN,
+            self._angle_delta_deg(self._yaw, self._level_yaw) * MOUNT_YAW_SIGN,
+        )
+
+    @staticmethod
+    def _angle_delta_deg(value_rad: float, baseline_rad: float) -> float:
+        deg = math.degrees(value_rad - baseline_rad)
+        while deg > 180.0:
+            deg -= 360.0
+        while deg < -180.0:
+            deg += 360.0
+        return deg
 
     def get_snapshot(self) -> dict:
         roll_deg, pitch_deg, yaw_deg = self.get_orientation_deg()
@@ -494,6 +652,9 @@ class ImuPanel(QGroupBox):
         self._roll = 0.0
         self._pitch = 0.0
         self._yaw = 0.0
+        self._level_roll = 0.0
+        self._level_pitch = 0.0
+        self._level_yaw = 0.0
         self._velocity = [0.0, 0.0, 0.0]
         self._position = [0.0, 0.0, 0.0]
         self._trail.clear()
@@ -502,9 +663,17 @@ class ImuPanel(QGroupBox):
         self._latest_accel = (0.0, 0.0, 0.0)
         self._latest_gyro = (0.0, 0.0, 0.0)
         self._online = False
+        self._auto_calibrating = False
+        self._calibration_seen = 0
+        self._calibration_accel_sum = [0.0, 0.0, 0.0]
+        self._calibration_gyro_sum = [0.0, 0.0, 0.0]
+        self._gyro_bias = (0.0, 0.0, 0.0)
+        self._world_accel_bias = (0.0, 0.0, 0.0)
         for label in self._labels.values():
             label.setText("--")
-        self._card_state.set_value("WAIT", "#FF9800")
+        text = "WAIT" if self._sensor_available else "OFF"
+        color = "#FF9800" if self._sensor_available else "#F44336"
+        self._card_state.set_value(text, color)
         self._card_age.set_value("--", "#90A4AE")
         self._card_rate.set_value("--", "#90A4AE")
         self._card_mode.set_value("Idle", "#90A4AE")

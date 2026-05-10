@@ -638,7 +638,7 @@ class ImuControlPanel(QGroupBox):
             ("Yaw", "yaw"),
             ("Accel", "accel"),
             ("Gyro", "gyro"),
-            ("Position", "position"),
+            ("Rel XY", "position"),
         ]
         for row, (title, key) in enumerate(items):
             label = QLabel(title)
@@ -855,5 +855,5 @@ class ImuControlPanel(QGroupBox):
             f'{snapshot["gyro"][0]:+.1f}, {snapshot["gyro"][1]:+.1f}, {snapshot["gyro"][2]:+.1f} dps'
         )
         self._labels["position"].setText(
-            f'{snapshot["position"][0]:+.2f}, {snapshot["position"][1]:+.2f}, {snapshot["position"][2]:+.2f} m'
+            f'{snapshot["position"][0]:+.2f}, {snapshot["position"][1]:+.2f} rel'
         )

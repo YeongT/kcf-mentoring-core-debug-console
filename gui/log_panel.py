@@ -1,6 +1,7 @@
 """Protocol log console with hex dump and human-readable mode."""
 
 import struct
+import time
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -35,6 +36,10 @@ from protocol import (
     parse_sd_chunk,
     parse_lidar_frame,
 )
+
+
+_THROTTLED_RX_PREFIXES = {PREFIX_CAMERA, PREFIX_LIDAR, PREFIX_IMU, PREFIX_SD_CHUNK}
+_DATA_LOG_INTERVAL_S = 0.5
 
 
 def _describe_message(direction: str, data: bytes) -> str:
@@ -138,6 +143,8 @@ class LogPanel(QGroupBox):
         self._line_count = 0
         self._plain_lines: list[str] = []
         self._verbose = True
+        self._last_data_log: dict[tuple[str, int], float] = {}
+        self._data_skip_count: dict[tuple[str, int], int] = {}
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -211,6 +218,15 @@ class LogPanel(QGroupBox):
 
         prefix = data[0]
         prefix_name = PREFIX_NAMES.get(prefix, f"0x{prefix:02X}")
+        throttle_key = (direction, prefix)
+        if direction == "RX" and prefix in _THROTTLED_RX_PREFIXES:
+            now = time.monotonic()
+            last = self._last_data_log.get(throttle_key, 0.0)
+            if now - last < _DATA_LOG_INTERVAL_S:
+                self._data_skip_count[throttle_key] = self._data_skip_count.get(throttle_key, 0) + 1
+                return
+            self._last_data_log[throttle_key] = now
+
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         color = "#4FC3F7" if direction == "TX" else "#A5D6A7"
 
@@ -219,6 +235,10 @@ class LogPanel(QGroupBox):
             detail = hex_str
         else:
             detail = _describe_message(direction, data)
+
+        skipped = self._data_skip_count.pop(throttle_key, 0)
+        if skipped:
+            detail = f"{detail} (+{skipped} skipped)"
 
         plain = f"{ts} {direction} [{prefix_name}] {detail}"
         html = f'<span style="color: gray;">{ts}</span> '

@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 import settings
-from protocol import CMD_GET_STATUS, DeviceStatus, parse_camera_frame, parse_imu_frame, parse_lidar_frame, parse_response, parse_status
+from protocol import CMD_GET_STATUS, CMD_IMU_SET_PREVIEW, PREFIX_CMD, DeviceStatus, parse_camera_frame, parse_imu_frame, parse_lidar_frame, parse_response, parse_status
 from session_logger import SessionLogger
 from udp_discovery import UdpDiscoveryListener
 from ws_server import DeviceConnection, WebSocketServer
@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         self._tab_indices: dict[str, int] = {}
         self._tab_enabled_states: dict[str, bool] = {}
         self._current_status = DeviceStatus()
+        self._command_quiet_until = 0.0
         self._demo_mode = False
         self._simulator = PrototypeSimulator(self)
         self._session_logger = SessionLogger()
@@ -487,12 +488,24 @@ class MainWindow(QMainWindow):
         self._show_device_select()
 
     def _on_raw_data(self, direction: str, data: bytes) -> None:
+        if direction == "TX" and len(data) >= 4 and data[0] == PREFIX_CMD and data[1] == CMD_IMU_SET_PREVIEW:
+            enabled = data[3] != 0
+            self._set_imu_transfer_mode(enabled)
+            self._begin_command_quiet_window(3.0)
         self._total_bytes += len(data)
         self._status_panel.update_data_total(self._total_bytes)
         self._dashboard_status_panel.update_data_total(self._total_bytes)
         if direction == "RX":
             self._status_panel.update_last_rx()
             self._dashboard_status_panel.update_last_rx()
+
+    def _set_imu_transfer_mode(self, active: bool) -> None:
+        self._sd_panel.set_refresh_paused(active)
+
+    def _begin_command_quiet_window(self, seconds: float) -> None:
+        self._command_quiet_until = max(self._command_quiet_until, time.monotonic() + seconds)
+        self._status_timer.stop()
+        QTimer.singleShot(int(seconds * 1000) + 100, self._restart_status_timer)
 
     def _tick_uptime(self) -> None:
         if self._connected_at > 0:
@@ -507,7 +520,7 @@ class MainWindow(QMainWindow):
         self._current_status = status
         self._status_panel.update_status(status)
         self._dashboard_status_panel.update_status(status)
-        self._imu_panel.set_online(status.imu_ok)
+        self._imu_panel.set_available(status.imu_ok)
         self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
         self._update_sensor_tabs(status)
         self._sd_panel.update_status(status)
@@ -546,11 +559,17 @@ class MainWindow(QMainWindow):
             self._current_status = status
             self._status_panel.update_status(status)
             self._dashboard_status_panel.update_status(status)
-            self._imu_panel.set_online(status.imu_ok)
+            self._imu_panel.set_available(status.imu_ok)
             self._map_controls.set_sensor_state(status.lidar_ok, status.imu_ok)
             self._update_sensor_tabs(status)
             self._sd_panel.update_status(status)
             self._sync_tab_meta(status)
+        elif resp.cmd_id == CMD_IMU_SET_PREVIEW and resp.ok and len(resp.payload) >= 1:
+            if resp.payload[0] != 0 and not self._imu_panel.is_monitoring():
+                self._imu_panel.begin_monitor_session()
+            elif resp.payload[0] == 0:
+                self._imu_panel.set_online(False)
+            self._set_imu_transfer_mode(resp.payload[0] != 0)
 
     def _update_sensor_tabs(self, status: DeviceStatus | None) -> None:
         if self._demo_mode:
@@ -799,6 +818,7 @@ class MainWindow(QMainWindow):
         self._camera_panel.reset()
         self._lidar_panel.reset()
         self._imu_panel.reset()
+        self._imu_panel.set_available(False)
         self._lidar3d_panel.reset()
         self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
         self._map_controls.set_sensor_state(False, False)
@@ -818,6 +838,8 @@ class MainWindow(QMainWindow):
             self._status_timer.start(self._status_poll_interval)
 
     def _poll_status(self) -> None:
+        if time.monotonic() < self._command_quiet_until:
+            return
         if self._conn.connected and not self._demo_mode:
             self._conn.send_command(CMD_GET_STATUS)
 

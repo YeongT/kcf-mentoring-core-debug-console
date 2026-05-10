@@ -43,6 +43,7 @@ class SdCardPanel(QGroupBox):
         self._entries_count = 0
         self._sd_available = False
         self._list_in_flight = False
+        self._refresh_paused = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(5000)
@@ -131,10 +132,18 @@ class SdCardPanel(QGroupBox):
         self._sync_download_state()
 
     def _on_auto_refresh_toggled(self, checked: bool) -> None:
-        if checked and self._conn.connected and self._sd_available:
+        if checked and self._conn.connected and self._sd_available and not self._refresh_paused:
             self._refresh_timer.start()
         else:
             self._refresh_timer.stop()
+
+    def set_refresh_paused(self, paused: bool) -> None:
+        self._refresh_paused = paused
+        if paused:
+            self._refresh_timer.stop()
+            return
+        if self._auto_refresh.isChecked() and self._conn.connected and self._sd_available:
+            self._refresh_timer.start()
 
     def _choose_folder(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Choose download folder", str(self._download_dir))
@@ -148,6 +157,8 @@ class SdCardPanel(QGroupBox):
             return
         if not self._sd_available:
             self._status.setText("SD card not mounted")
+            return
+        if self._refresh_paused:
             return
         if self._list_in_flight:
             return
@@ -172,7 +183,7 @@ class SdCardPanel(QGroupBox):
         else:
             self._capacity.setText(f"Capacity: {status.sd_str}")
             self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
-            if not was_available and self._conn.connected:
+            if not was_available and self._conn.connected and not self._refresh_paused:
                 if self._auto_refresh.isChecked():
                     self._refresh_timer.start()
                 self.request_refresh()
