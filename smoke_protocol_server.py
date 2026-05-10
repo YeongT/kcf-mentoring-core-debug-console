@@ -18,11 +18,13 @@ from protocol import (
     PREFIX_INIT,
     PREFIX_INIT_ACK,
     PREFIX_RES,
+    PREFIX_SD_CHUNK,
     PREFIX_STATUS,
     PROTOCOL_VERSION,
     DeviceStatus,
     build_command,
     parse_command,
+    parse_sd_chunk,
 )
 from udp_discovery import UdpDiscoveryListener
 from ws_server import DeviceConnection, WebSocketServer
@@ -74,6 +76,10 @@ def test_protocol_and_discovery_validation() -> None:
     assert UdpDiscoveryListener._parse_packet("CORE|999.1.1.1") is None
     assert UdpDiscoveryListener._parse_packet("bad\x01name|192.168.1.50") is None
     assert UdpDiscoveryListener._parse_packet("CONNECT|127.0.0.1:3421") is None
+    chunk = parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 3, 0x01, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2]))
+    assert chunk is not None
+    assert chunk.transfer_id == 3
+    assert parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 3, 0x00, 0, 0, 0, 0, 2, 0, 0, 0])) is None
 
 
 async def test_live_websocket_handshake_and_commands() -> None:

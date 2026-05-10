@@ -121,7 +121,10 @@ def _describe_message(direction: str, data: bytes) -> str:
     if prefix == PREFIX_SD_CHUNK:
         chunk = parse_sd_chunk(data)
         if chunk:
-            return f"SD_CHUNK offset={chunk.offset} size={len(chunk.data)} eof={int(chunk.is_eof)}"
+            return (
+                f"SD_CHUNK transfer={chunk.transfer_id} "
+                f"offset={chunk.offset} size={len(chunk.data)} eof={int(chunk.is_eof)}"
+            )
 
     prefix_name = PREFIX_NAMES.get(prefix, f"0x{prefix:02X}")
     return f"{prefix_name} ({len(data)} bytes)"

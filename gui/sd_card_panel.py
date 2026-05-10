@@ -38,6 +38,7 @@ class SdCardPanel(QGroupBox):
         self._conn = connection
         self._download_dir = Path.home() / "Downloads"
         self._download_path: str | None = None
+        self._download_seq: int | None = None
         self._download_fp = None
         self._entries_count = 0
         self._sd_available = False
@@ -247,7 +248,10 @@ class SdCardPanel(QGroupBox):
             self._sync_download_state()
             return
         self._status.setText(f"Downloading {Path(path).name}...")
-        self._conn.send_command(CMD_SD_DOWNLOAD, path.encode("utf-8"))
+        self._download_seq = self._conn.send_command(CMD_SD_DOWNLOAD, path.encode("utf-8"))
+        if self._download_seq is None:
+            self._status.setText("Download request failed: not connected")
+            self._close_download()
 
     def _on_sd_chunk(self, data: bytes) -> None:
         if not self._conn.connected or not self._sd_available:
@@ -258,6 +262,8 @@ class SdCardPanel(QGroupBox):
             if self._download_fp is not None:
                 self._status.setText("Download failed: invalid SD chunk")
                 self._close_download()
+            return
+        if self._download_seq is not None and chunk.transfer_id != self._download_seq:
             return
         if self._download_fp is None:
             return
@@ -275,6 +281,7 @@ class SdCardPanel(QGroupBox):
             self._download_fp.close()
             self._download_fp = None
         self._download_path = None
+        self._download_seq = None
 
     def _sync_download_state(self) -> None:
         item = self._tree.currentItem()

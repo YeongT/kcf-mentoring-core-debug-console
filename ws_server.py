@@ -6,6 +6,7 @@ import threading
 from typing import Optional
 
 from websockets.asyncio.server import serve, ServerConnection
+from websockets.exceptions import ConnectionClosed
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -30,6 +31,10 @@ from protocol import (
     parse_sd_chunk,
     build_command,
 )
+
+DEVICE_MESSAGE_TIMEOUT_S = 20.0
+PING_INTERVAL_S = 10.0
+PING_TIMEOUT_S = 10.0
 
 
 class DeviceConnection(QObject):
@@ -77,20 +82,21 @@ class DeviceConnection(QObject):
         self._seq = (self._seq + 1) & 0xFF
         return seq
 
-    def send_command(self, cmd_id: int, payload: bytes = b"") -> None:
+    def send_command(self, cmd_id: int, payload: bytes = b"") -> int | None:
         """Send a command to the device (thread-safe)."""
         ws = self._ws
         loop = self._loop
         if not ws or not loop:
-            return
+            return None
         seq = self.next_seq()
         try:
             packet = build_command(cmd_id, seq, payload)
         except (TypeError, ValueError) as e:
             self.log_message.emit(f"Command build failed: {e}")
-            return
+            return None
         self.raw_message_received.emit("TX", packet)
         self._schedule_send(ws, loop, packet)
+        return seq
 
     def send_raw(self, data: bytes) -> None:
         """Send raw bytes to the device (thread-safe)."""
@@ -299,6 +305,9 @@ class WebSocketServer(QObject):
                 self._handle_connection,
                 sock=sock,
                 max_size=2**20,  # 1MB max message
+                ping_interval=PING_INTERVAL_S,
+                ping_timeout=PING_TIMEOUT_S,
+                close_timeout=3,
             )
         except Exception:
             sock.close()
@@ -451,8 +460,9 @@ class WebSocketServer(QObject):
         conn.log_message.emit(f"Device connected: {device_name}")
 
         try:
-            async for message in ws:
+            while True:
                 try:
+                    message = await asyncio.wait_for(ws.recv(), timeout=DEVICE_MESSAGE_TIMEOUT_S)
                     if isinstance(message, bytes):
                         if not self._validate_device_message(message):
                             continue
@@ -472,10 +482,17 @@ class WebSocketServer(QObject):
                             conn.sd_chunk_received.emit(message)
                     elif isinstance(message, str):
                         conn.log_message.emit(f"TEXT: {message}")
+                except asyncio.TimeoutError:
+                    conn.log_message.emit("Device connection timed out waiting for protocol traffic")
+                    await self._close_bad_handshake(ws, "device traffic timeout")
+                    break
                 except (asyncio.CancelledError, GeneratorExit):
+                    break
+                except ConnectionClosed:
                     break
                 except Exception as e:
                     conn.log_message.emit(f"Message processing error: {e}")
+                    break
         except (asyncio.CancelledError, GeneratorExit):
             pass
         except Exception as e:

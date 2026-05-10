@@ -14,6 +14,7 @@ from protocol import (
     PREFIX_INIT,
     PREFIX_INIT_ACK,
     PREFIX_RES,
+    PREFIX_SD_CHUNK,
     PREFIX_STATUS,
     PROTOCOL_VERSION,
     RESULT_OK,
@@ -23,6 +24,7 @@ from protocol import (
     build_command,
     parse_init,
     parse_response,
+    parse_sd_chunk,
     parse_status,
 )
 from udp_discovery import UdpDiscoveryListener
@@ -76,6 +78,15 @@ def run() -> None:
     response = parse_response(bytes([PREFIX_RES, CMD_START_STREAM, 7, RESULT_OK]))
     assert response is not None
     assert response.ok
+
+    chunk = parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 7, 0x01, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2]))
+    assert chunk is not None
+    assert chunk.transfer_id == 7
+    assert chunk.offset == 0
+    assert chunk.total_size == 2
+    assert chunk.data == b"\x01\x02"
+    assert chunk.is_eof
+    assert parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 8, 0x01, 0, 0, 0, 0, 3, 0, 0, 0, 1, 2])) is None
 
     assert UdpDiscoveryListener._parse_packet(b"CORE_DEVICE|192.168.137.100", "192.168.137.100")
     assert UdpDiscoveryListener._parse_packet(b"CONNECT|192.168.137.1:3421", "192.168.137.100") is None

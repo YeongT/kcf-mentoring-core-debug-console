@@ -408,6 +408,7 @@ class SdEntry:
 
 @dataclass
 class SdChunk:
+    transfer_id: int
     flags: int
     offset: int
     total_size: int
@@ -799,19 +800,24 @@ def parse_imu_frame(data: bytes) -> Optional[ImuFrame]:
 
 
 def parse_sd_chunk(data: bytes) -> Optional[SdChunk]:
-    """Parse an SD download chunk: [0x24] [flags:1B] [offset:4B] [total_size:4B] [bytes...]."""
+    """Parse SD chunk: [0x24] [transfer_id:1B] [flags:1B] [offset:4B] [total_size:4B] [bytes...]."""
     if not isinstance(data, (bytes, bytearray, memoryview)):
         return None
     data = bytes(data)
-    if len(data) < 10 or data[0] != PREFIX_SD_CHUNK:
+    if len(data) < 11 or data[0] != PREFIX_SD_CHUNK:
         return None
-    flags = data[1]
-    offset = struct.unpack_from("<I", data, 2)[0]
-    total_size = struct.unpack_from("<I", data, 6)[0]
-    chunk_data = data[10:]
+    transfer_id = data[1]
+    flags = data[2]
+    offset = struct.unpack_from("<I", data, 3)[0]
+    total_size = struct.unpack_from("<I", data, 7)[0]
+    chunk_data = data[11:]
     if offset > total_size or offset + len(chunk_data) > total_size:
         return None
-    return SdChunk(flags=flags, offset=offset, total_size=total_size, data=chunk_data)
+    if flags & 0x01 and offset + len(chunk_data) != total_size:
+        return None
+    if not (flags & 0x01) and len(chunk_data) == 0:
+        return None
+    return SdChunk(transfer_id=transfer_id, flags=flags, offset=offset, total_size=total_size, data=chunk_data)
 
 
 def parse_sd_entries(data: bytes) -> list[SdEntry]:
