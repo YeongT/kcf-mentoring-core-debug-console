@@ -128,7 +128,7 @@ class SdCardPanel(QGroupBox):
         self._sync_download_state()
 
     def _on_auto_refresh_toggled(self, checked: bool) -> None:
-        if checked and self._conn.connected:
+        if checked and self._conn.connected and self._sd_available:
             self._refresh_timer.start()
         else:
             self._refresh_timer.stop()
@@ -150,10 +150,13 @@ class SdCardPanel(QGroupBox):
         self._sd_available = status.sd_ok and status.sd_total_mb > 0
         if not self._sd_available:
             self._refresh_timer.stop()
+            self._tree.clear()
+            self._entries_count = 0
+            self._close_download()
             self._capacity.setText("Capacity: Not Mounted")
             self._capacity.setStyleSheet("color: #F44336; font-weight: bold; margin-right: 10px;")
-            if self._entries_count == 0:
-                self._status.setText("SD card not mounted")
+            self._status.setText("SD card not mounted")
+            self._sync_download_state()
         else:
             self._capacity.setText(f"Capacity: {status.sd_str}")
             self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
@@ -203,6 +206,8 @@ class SdCardPanel(QGroupBox):
         self._sync_download_state()
 
     def _download_selected(self) -> None:
+        if not self._sd_available:
+            return
         item = self._tree.currentItem()
         if not item:
             return
@@ -240,11 +245,15 @@ class SdCardPanel(QGroupBox):
     def _sync_download_state(self) -> None:
         item = self._tree.currentItem()
         is_file = bool(item and item.data(0, Qt.ItemDataRole.UserRole + 1))
-        self._btn_download.setEnabled(is_file and self._conn.connected)
+        self._btn_download.setEnabled(is_file and self._conn.connected and self._sd_available)
 
     def reset(self) -> None:
+        self._sd_available = False
         self._tree.clear()
         self._status.setText("No SD listing loaded")
+        self._capacity.setText("Capacity: --")
+        self._capacity.setStyleSheet("color: #4CAF50; font-weight: bold; margin-right: 10px;")
         self._entries_count = 0
+        self._refresh_timer.stop()
         self._close_download()
         self._sync_download_state()

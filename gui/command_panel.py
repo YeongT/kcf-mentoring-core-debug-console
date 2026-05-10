@@ -71,6 +71,25 @@ _STYLE_SCAN_ON = "background-color: #F44336; color: white;"
 _STYLE_STREAM_OFF = "background-color: #2196F3; color: white;"
 _STYLE_STREAM_ON = "background-color: #F44336; color: white;"
 
+_CAMERA_COMMANDS = {
+    CMD_START_STREAM,
+    CMD_STOP_STREAM,
+    CMD_CAPTURE_FRAME,
+    CMD_SET_CAMERA_CONFIG,
+    CMD_CAMERA_GET_INFO,
+    CMD_CAMERA_SET_PARAM,
+}
+
+_LIDAR_COMMANDS = {
+    CMD_START_SCAN,
+    CMD_STOP_SCAN,
+    CMD_SET_MOTOR_RPM,
+    CMD_LIDAR_GET_INFO,
+    CMD_LIDAR_GET_HEALTH,
+    CMD_LIDAR_RESET,
+    CMD_LIDAR_SET_SCAN_MODE,
+}
+
 
 class CommandPanel(QGroupBox):
     reset_requested = pyqtSignal()
@@ -80,6 +99,8 @@ class CommandPanel(QGroupBox):
         self._conn = connection
         self._scanning = False
         self._streaming = False
+        self._camera_available = False
+        self._lidar_available = False
         self._reconnecting = False
         self._init_ui()
         self._set_enabled(False)
@@ -302,12 +323,15 @@ class CommandPanel(QGroupBox):
         if _initial_status:
             self._on_status(_initial_status)
         # Auto-fetch LiDAR info and health on connect
-        self._send(CMD_LIDAR_GET_INFO)
-        self._send(CMD_LIDAR_GET_HEALTH)
+        if self._lidar_available:
+            self._send(CMD_LIDAR_GET_INFO)
+            self._send(CMD_LIDAR_GET_HEALTH)
 
     def _on_disconnected(self) -> None:
         self._scanning = False
         self._streaming = False
+        self._camera_available = False
+        self._lidar_available = False
         self._sync_init_settings()
         self._btn_scan.setText("Start Scan")
         self._btn_stream.setText("Start Stream")
@@ -321,8 +345,10 @@ class CommandPanel(QGroupBox):
         status = parse_status(data)
         if not status:
             return
-        self._scanning = status.scan_state == SCAN_SCANNING
-        self._streaming = bool(status.camera_streaming)
+        self._camera_available = status.camera_ok
+        self._lidar_available = status.lidar_ok
+        self._scanning = status.scan_state != SCAN_IDLE
+        self._streaming = bool(status.camera_streaming) if self._camera_available else False
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
@@ -334,7 +360,7 @@ class CommandPanel(QGroupBox):
         else:
             self._btn_scan.setText("Start Scan")
             self._btn_scan.setStyleSheet(_STYLE_SCAN_OFF)
-        self._btn_scan.setEnabled(True)
+        self._btn_scan.setEnabled(self._lidar_available)
 
         if self._streaming:
             self._btn_stream.setText("Stop Stream")
@@ -342,7 +368,7 @@ class CommandPanel(QGroupBox):
         else:
             self._btn_stream.setText("Start Stream")
             self._btn_stream.setStyleSheet(_STYLE_STREAM_OFF)
-        self._btn_stream.setEnabled(True)
+        self._btn_stream.setEnabled(self._camera_available)
 
     def _set_enabled(self, enabled: bool) -> None:
         for child in self.findChildren(QPushButton):
@@ -731,6 +757,8 @@ class CommandPanel(QGroupBox):
                 )
 
     def _toggle_scan(self) -> None:
+        if not self._lidar_available:
+            return
         self._btn_scan.setEnabled(False)
         if self._scanning:
             self._send(CMD_STOP_SCAN)
@@ -738,6 +766,8 @@ class CommandPanel(QGroupBox):
             self._send(CMD_START_SCAN)
 
     def _toggle_stream(self) -> None:
+        if not self._camera_available:
+            return
         self._btn_stream.setEnabled(False)
         if self._streaming:
             self._send(CMD_STOP_STREAM)
@@ -754,11 +784,20 @@ class CommandPanel(QGroupBox):
         self._conn.disconnect()
 
     def _send(self, cmd_id: int) -> None:
+        if cmd_id in _CAMERA_COMMANDS and not self._camera_available:
+            self._conn.log_message.emit("Camera command skipped: camera unavailable")
+            return
+        if cmd_id in _LIDAR_COMMANDS and not self._lidar_available:
+            self._conn.log_message.emit("LiDAR command skipped: LiDAR unavailable")
+            return
         name = CMD_NAMES.get(cmd_id, f"0x{cmd_id:02X}")
         self._conn.log_message.emit(f"User command: {name}")
         self._conn.send_command(cmd_id)
 
     def _send_camera_config(self) -> None:
+        if not self._camera_available:
+            self._conn.log_message.emit("Camera config skipped: camera unavailable")
+            return
         res_val = self._resolution_combo.currentData()
         qual_val = self._quality_combo.currentData()
         res_name = self._resolution_combo.currentText()
@@ -772,6 +811,9 @@ class CommandPanel(QGroupBox):
         self._sync_init_settings()
 
     def _send_rpm(self) -> None:
+        if not self._lidar_available:
+            self._conn.log_message.emit("RPM command skipped: LiDAR unavailable")
+            return
         rpm = self._rpm_spin.value()
         self._conn.log_message.emit(f"User command: SET_MOTOR_RPM rpm={rpm}")
         self._conn.send_command(CMD_SET_MOTOR_RPM, struct.pack("<H", rpm))
@@ -796,7 +838,7 @@ class CommandPanel(QGroupBox):
             extra = (self._GRP_FIRST if i == 0 else "") + (self._GRP_LAST if i == len(self._scan_mode_buttons) - 1 else "")
             btn.setStyleSheet(base + f"min-width: 56px;{extra}")
         # Send command to device
-        if self._conn.connected:
+        if self._conn.connected and self._lidar_available:
             from protocol import SCAN_MODE_NAMES
             name = SCAN_MODE_NAMES.get(mode, str(mode))
             self._conn.log_message.emit(f"User command: LIDAR_SET_SCAN_MODE mode={name}")
@@ -820,7 +862,7 @@ class CommandPanel(QGroupBox):
         self._lidar_health_label.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: bold;")
 
     def _send_camera_param(self, param_id: int, value: int) -> None:
-        if not self._conn.connected:
+        if not self._conn.connected or not self._camera_available:
             return
         from protocol import CAMERA_PARAM_NAMES
         name = CAMERA_PARAM_NAMES.get(param_id, f"0x{param_id:02X}")

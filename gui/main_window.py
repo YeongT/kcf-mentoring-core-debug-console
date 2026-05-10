@@ -884,7 +884,3 @@ class MainWindow(QMainWindow):
         self._imu_panel.reset()
         self._lidar3d_panel.reset()
         self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
-
-        self._imu_panel.reset()
-        self._lidar3d_panel.reset()
-        self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())

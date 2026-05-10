@@ -17,9 +17,15 @@ from protocol import (
     PREFIX_LIDAR,
     PREFIX_IMU,
     PREFIX_SD_CHUNK,
+    PROTOCOL_VERSION,
     DeviceStatus,
     InitAckSettings,
     parse_init,
+    parse_response,
+    parse_status,
+    parse_lidar_frame,
+    parse_imu_frame,
+    parse_sd_chunk,
     build_command,
 )
 
@@ -71,30 +77,42 @@ class DeviceConnection(QObject):
 
     def send_command(self, cmd_id: int, payload: bytes = b"") -> None:
         """Send a command to the device (thread-safe)."""
-        if not self._ws or not self._loop:
+        ws = self._ws
+        loop = self._loop
+        if not ws or not loop:
             return
         seq = self.next_seq()
-        packet = build_command(cmd_id, seq, payload)
+        try:
+            packet = build_command(cmd_id, seq, payload)
+        except (TypeError, ValueError) as e:
+            self.log_message.emit(f"Command build failed: {e}")
+            return
         self.raw_message_received.emit("TX", packet)
         try:
-            asyncio.run_coroutine_threadsafe(self._send(packet), self._loop)
+            asyncio.run_coroutine_threadsafe(self._send(ws, packet), loop)
         except RuntimeError:
             pass  # event loop closed
 
     def send_raw(self, data: bytes) -> None:
         """Send raw bytes to the device (thread-safe)."""
-        if not self._ws or not self._loop:
+        ws = self._ws
+        loop = self._loop
+        if not ws or not loop:
             return
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            self.log_message.emit("Raw send failed: data must be bytes-like")
+            return
+        data = bytes(data)
         self.raw_message_received.emit("TX", data)
         try:
-            asyncio.run_coroutine_threadsafe(self._send(data), self._loop)
+            asyncio.run_coroutine_threadsafe(self._send(ws, data), loop)
         except RuntimeError:
             pass  # event loop closed
 
-    async def _send(self, data: bytes) -> None:
-        if self._ws:
+    async def _send(self, ws: ServerConnection, data: bytes) -> None:
+        if self._ws is ws:
             try:
-                await self._ws.send(data)
+                await ws.send(data)
             except Exception:
                 pass
 
@@ -127,6 +145,7 @@ class DeviceConnection(QObject):
         """Clear connection only if conn_id matches current. Returns True if cleared."""
         if conn_id == self._conn_id:
             self._ws = None
+            self._device_name = ""
             return True
         return False  # stale disconnect, ignore
 
@@ -145,7 +164,7 @@ class WebSocketServer(QObject):
     server_stopped = pyqtSignal()  # emitted when server stops (crash or manual)
     server_failed = pyqtSignal(str)  # error message
 
-    def __init__(self, connection: DeviceConnection, host: str = "0.0.0.0", port: int = 3000):
+    def __init__(self, connection: DeviceConnection, host: str = "0.0.0.0", port: int = 3421):
         super().__init__()
         self._connection = connection
         self._host = host
@@ -172,8 +191,9 @@ class WebSocketServer(QObject):
         self._port = value
 
     def start(self) -> None:
-        if self._running:
+        if self._running or self._thread:
             return
+        self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -190,7 +210,7 @@ class WebSocketServer(QObject):
             except Exception as e:
                 self._connection.log_message.emit(f"Server shutdown warning: {e}")
                 loop.call_soon_threadsafe(loop.stop)
-        if thread:
+        if thread and thread is not threading.current_thread():
             thread.join(timeout=3)
         self._thread = None
         self._loop = None
@@ -231,13 +251,12 @@ class WebSocketServer(QObject):
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._setup())
-        except OSError as e:
+        except Exception as e:
             self._connection.log_message.emit(f"Server start failed: {e}")
             self._running = False
             self.server_failed.emit(str(e))
             loop.close()
             return
-        self._running = True
         self.server_started.emit()
         try:
             loop.run_forever()
@@ -255,17 +274,52 @@ class WebSocketServer(QObject):
     async def _setup(self) -> None:
         # Create socket with SO_REUSEADDR to allow quick restart
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self._host, self._port))
-        sock.listen()
-        sock.setblocking(False)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self._host, self._port))
+            sock.listen()
+            sock.setblocking(False)
 
-        self._server = await serve(
-            self._handle_connection,
-            sock=sock,
-            max_size=2**20,  # 1MB max message
-        )
+            self._server = await serve(
+                self._handle_connection,
+                sock=sock,
+                max_size=2**20,  # 1MB max message
+            )
+        except Exception:
+            sock.close()
+            raise
         self._connection.log_message.emit(f"WebSocket server listening on {self._host}:{self._port}")
+
+    def _validate_device_message(self, message: bytes) -> bool:
+        conn = self._connection
+        prefix = message[0]
+        if prefix == PREFIX_RES:
+            if parse_response(message):
+                return True
+            conn.log_message.emit(f"Dropped malformed RES ({len(message)} bytes)")
+        elif prefix == PREFIX_STATUS:
+            if parse_status(message):
+                return True
+            conn.log_message.emit(f"Dropped malformed STATUS ({len(message)} bytes)")
+        elif prefix == PREFIX_CAMERA:
+            if len(message) >= 2:
+                return True
+            conn.log_message.emit("Dropped empty CAMERA frame")
+        elif prefix == PREFIX_LIDAR:
+            if parse_lidar_frame(message):
+                return True
+            conn.log_message.emit(f"Dropped malformed LIDAR frame ({len(message)} bytes)")
+        elif prefix == PREFIX_IMU:
+            if parse_imu_frame(message):
+                return True
+            conn.log_message.emit(f"Dropped malformed IMU frame ({len(message)} bytes)")
+        elif prefix == PREFIX_SD_CHUNK:
+            if parse_sd_chunk(message):
+                return True
+            conn.log_message.emit(f"Dropped malformed SD_CHUNK ({len(message)} bytes)")
+        else:
+            conn.log_message.emit(f"Dropped unknown binary prefix 0x{prefix:02X} ({len(message)} bytes)")
+        return False
 
     async def _handle_connection(self, ws: ServerConnection) -> None:
         conn = self._connection
@@ -280,29 +334,37 @@ class WebSocketServer(QObject):
             conn.log_message.emit(f"Handshake failed: {e}")
             return
 
-        if not isinstance(first_msg, bytes) or len(first_msg) < 1:
-            conn.log_message.emit("Handshake failed: expected binary INIT")
+        if isinstance(first_msg, bytes) and len(first_msg) < 1:
+            conn.log_message.emit("Handshake failed: empty binary message")
             return
 
         # Parse INIT
-        if first_msg[0] == PREFIX_INIT:
+        if isinstance(first_msg, bytes) and first_msg[0] == PREFIX_INIT:
             init_msg = parse_init(first_msg)
             if not init_msg:
                 conn.log_message.emit("Handshake failed: malformed INIT")
+                return
+            if init_msg.protocol_version != PROTOCOL_VERSION:
+                conn.log_message.emit(
+                    f"Handshake failed: protocol v{init_msg.protocol_version} != v{PROTOCOL_VERSION}"
+                )
                 return
             device_name = init_msg.device_name
             conn.raw_message_received.emit("RX", first_msg)
             conn.log_message.emit(
                 f"INIT from '{device_name}' (proto v{init_msg.protocol_version})"
             )
-        else:
+        elif isinstance(first_msg, str):
             # Fallback: legacy TEXT handshake
-            if isinstance(first_msg, str):
-                device_name = first_msg
-            else:
-                device_name = first_msg.decode("utf-8", errors="replace")
+            device_name = first_msg.strip()
+            if not device_name:
+                conn.log_message.emit("Handshake failed: empty legacy device name")
+                return
             conn.log_message.emit(f"Legacy handshake from '{device_name}'")
             init_msg = None
+        else:
+            conn.log_message.emit("Handshake failed: expected binary INIT")
+            return
 
         conn_id = conn._set_connection(ws, loop)
         conn._device_name = device_name
@@ -327,11 +389,9 @@ class WebSocketServer(QObject):
             conn.log_message.emit(f"INIT_ACK sent ({', '.join(parts)})")
 
             # Build initial status bytes for the signal (prefix + DeviceStatus)
-            raw_status_data = first_msg[3 + first_msg[2]:]
-            if len(raw_status_data) >= DeviceStatus.STRUCT_SIZE:
-                initial_status = bytes([PREFIX_STATUS]) + raw_status_data[:DeviceStatus.STRUCT_SIZE]
-            else:
-                initial_status = b""
+            initial_status = bytes([PREFIX_STATUS]) + first_msg[
+                3 + first_msg[2] : 3 + first_msg[2] + DeviceStatus.STRUCT_SIZE
+            ]
         else:
             initial_status = b""
 
@@ -342,6 +402,8 @@ class WebSocketServer(QObject):
             async for message in ws:
                 try:
                     if isinstance(message, bytes) and len(message) > 0:
+                        if not self._validate_device_message(message):
+                            continue
                         conn.raw_message_received.emit("RX", message)
                         prefix = message[0]
                         if prefix == PREFIX_RES:

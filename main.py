@@ -24,7 +24,7 @@ def main() -> None:
     connection = DeviceConnection()
 
     # Server auto-starts — devices connect via UDP CONNECT command
-    server = WebSocketServer(connection, host="0.0.0.0", port=saved.get("server_port", 3000))
+    server = WebSocketServer(connection, host="0.0.0.0", port=saved.get("server_port", 3421))
     server.start()
 
     # UDP Discovery listener — starts immediately to find devices

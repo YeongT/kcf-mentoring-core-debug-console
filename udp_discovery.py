@@ -10,11 +10,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from ipaddress import ip_address
 from typing import Dict, List, Optional, Callable
 
 DISCOVERY_PORT = 4200
 DEVICE_TIMEOUT_S = 5.0
 BUFFER_SIZE = 256
+MAX_DEVICE_NAME_BYTES = 103
 
 
 @dataclass
@@ -117,8 +119,7 @@ class UdpDiscoveryListener:
             except OSError:
                 break
 
-            message = data.decode("utf-8", errors="ignore").strip()
-            device = self._parse_packet(message)
+            device = self._parse_packet(data, addr[0])
             if device is None:
                 continue
 
@@ -156,8 +157,20 @@ class UdpDiscoveryListener:
                 self._notify()
 
     @staticmethod
-    def _parse_packet(message: str) -> Optional[DiscoveredDevice]:
+    def _parse_packet(message: bytes | str, source_ip: str = "") -> Optional[DiscoveredDevice]:
         """Parse 'DEVICE_NAME|IP_ADDRESS' packet."""
+        if isinstance(message, bytes):
+            try:
+                message = message.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        elif not isinstance(message, str):
+            return None
+
+        message = message.strip()
+        if not message or message.startswith("CONNECT|"):
+            return None
+
         parts = message.split("|")
         if len(parts) != 2:
             return None
@@ -166,21 +179,48 @@ class UdpDiscoveryListener:
         ip = parts[1].strip()
         if not name or not ip:
             return None
+        if len(name.encode("utf-8")) > MAX_DEVICE_NAME_BYTES:
+            return None
+        if any(ord(ch) < 32 for ch in name):
+            return None
+        try:
+            parsed_ip = ip_address(ip)
+        except ValueError:
+            return None
+        if parsed_ip.version != 4:
+            return None
+        if source_ip:
+            try:
+                if ip_address(source_ip).version != 4:
+                    return None
+            except ValueError:
+                return None
 
         return DiscoveredDevice(name=name, ip_address=ip)
 
     def send_connect(self, device_ip: str, server_ip: str, server_port: int) -> bool:
         """Send CONNECT|server_ip:server_port to a device via UDP unicast."""
+        try:
+            if ip_address(device_ip).version != 4 or ip_address(server_ip).version != 4:
+                return False
+            if not isinstance(server_port, int) or server_port < 1 or server_port > 65535:
+                return False
+        except ValueError:
+            return False
+
         message = f"CONNECT|{server_ip}:{server_port}"
+        sock: Optional[socket.socket] = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(message.encode("utf-8"), (device_ip, self._port))
-            sock.close()
             print(f"[Discovery] Sent CONNECT to {device_ip}: {message}")
             return True
         except OSError as e:
             print(f"[Discovery] Failed to send CONNECT to {device_ip}: {e}")
             return False
+        finally:
+            if sock:
+                sock.close()
 
     def _notify(self) -> None:
         """Notify callback with current device list."""

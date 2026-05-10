@@ -2,7 +2,11 @@
 
 import struct
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
+
+PROTOCOL_VERSION = 2
+MAX_PACKET_SIZE = 2**20
+MAX_DEVICE_NAME_BYTES = 103  # Firmware INIT buffer is 128 bytes: 3 header + name + 22 status.
 
 # --- Message Prefixes (grouped by function) ---
 # 0x00~0x0F: Handshake
@@ -155,6 +159,32 @@ CMD_NAMES = {
     CMD_IMU_SET_PREVIEW: "IMU_SET_PREVIEW",
 }
 
+
+def _bytes_like(data: bytes | bytearray | memoryview, name: str = "data") -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError(f"{name} must be bytes-like")
+    return bytes(data)
+
+
+def _uint_in_range(value: int, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be in range {minimum}..{maximum}, got {value}")
+    return value
+
+
+def _uint8(value: int, name: str) -> int:
+    return _uint_in_range(value, name, 0, 0xFF)
+
+
+def _uint16(value: int, name: str) -> int:
+    return _uint_in_range(value, name, 0, 0xFFFF)
+
+
+def _int16(value: int, name: str) -> int:
+    return _uint_in_range(value, name, -0x8000, 0x7FFF)
+
 # --- Camera Resolution/Quality enums (matches firmware CameraController) ---
 # Resolution values are ESP-IDF framesize_t enum values
 CAMERA_RESOLUTIONS = {
@@ -230,21 +260,26 @@ class DeviceStatus:
     camera_streaming: int = 0
     sensor_flags: int = 0  # bit0=LiDAR, bit1=IMU, bit2=Camera, bit3=SD
 
-    STRUCT_SIZE = 22
+    STRUCT_FORMAT = "<BHIIIIBBB"
+    STRUCT = struct.Struct(STRUCT_FORMAT)
+    STRUCT_SIZE = STRUCT.size
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DeviceStatus":
+        data = _bytes_like(data)
         if len(data) < cls.STRUCT_SIZE:
             raise ValueError(f"DeviceStatus needs {cls.STRUCT_SIZE} bytes, got {len(data)}")
-        scan_state = data[0]
-        lidar_rpm = struct.unpack_from("<H", data, 1)[0]
-        sd_free_mb = struct.unpack_from("<I", data, 3)[0]
-        sd_total_mb = struct.unpack_from("<I", data, 7)[0]
-        frame_count = struct.unpack_from("<I", data, 11)[0]
-        scan_duration_ms = struct.unpack_from("<I", data, 15)[0]
-        battery_pct = data[19]
-        camera_streaming = data[20]
-        sensor_flags = data[21]
+        (
+            scan_state,
+            lidar_rpm,
+            sd_free_mb,
+            sd_total_mb,
+            frame_count,
+            scan_duration_ms,
+            battery_pct,
+            camera_streaming,
+            sensor_flags,
+        ) = cls.STRUCT.unpack_from(data, 0)
         return cls(
             scan_state=scan_state,
             lidar_rpm=lidar_rpm,
@@ -381,6 +416,17 @@ class SdChunk:
     @property
     def is_eof(self) -> bool:
         return bool(self.flags & 0x01)
+
+
+@dataclass
+class CommandRequest:
+    cmd_id: int
+    seq: int
+    payload: bytes
+
+    @property
+    def cmd_name(self) -> str:
+        return CMD_NAMES.get(self.cmd_id, f"0x{self.cmd_id:02X}")
 
 
 @dataclass
@@ -599,34 +645,50 @@ class CameraInfo:
 
 def build_command(cmd_id: int, seq: int, payload: bytes = b"") -> bytes:
     """Build a command packet: [0x10] [cmd_id] [seq] [payload...]"""
-    return bytes([PREFIX_CMD, cmd_id, seq]) + payload
+    payload = _bytes_like(payload, "payload")
+    return bytes([PREFIX_CMD, _uint8(cmd_id, "cmd_id"), _uint8(seq, "seq")]) + payload
 
 
 def build_set_motor_rpm(seq: int, rpm: int) -> bytes:
-    return build_command(CMD_SET_MOTOR_RPM, seq, struct.pack("<H", rpm))
+    return build_command(CMD_SET_MOTOR_RPM, seq, struct.pack("<H", _uint16(rpm, "rpm")))
 
 
 def build_start_stream(seq: int, interval_ms: int = 0) -> bytes:
-    return build_command(CMD_START_STREAM, seq, struct.pack("<H", interval_ms))
+    return build_command(CMD_START_STREAM, seq, struct.pack("<H", _uint16(interval_ms, "interval_ms")))
 
 
 def build_camera_set_param(seq: int, param_id: int, value: int) -> bytes:
     """Build CAMERA_SET_PARAM: [param_id:1B][value:2B LE int16]"""
-    return build_command(CMD_CAMERA_SET_PARAM, seq, struct.pack("<Bh", param_id, value))
+    return build_command(
+        CMD_CAMERA_SET_PARAM,
+        seq,
+        struct.pack("<Bh", _uint8(param_id, "param_id"), _int16(value, "value")),
+    )
 
 
 def build_set_led(seq: int, index: int, r: int, g: int, b: int) -> bytes:
-    return build_command(CMD_SET_LED, seq, bytes([index, r, g, b]))
+    return build_command(
+        CMD_SET_LED,
+        seq,
+        bytes([
+            _uint8(index, "index"),
+            _uint8(r, "r"),
+            _uint8(g, "g"),
+            _uint8(b, "b"),
+        ]),
+    )
 
 
 def build_set_lcd_text(seq: int, line: int, text: str) -> bytes:
-    return build_command(CMD_SET_LCD_TEXT, seq, bytes([line]) + text.encode("utf-8"))
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    return build_command(CMD_SET_LCD_TEXT, seq, bytes([_uint8(line, "line")]) + text.encode("utf-8"))
 
 
 def build_imu_set_preview(seq: int, enabled: bool, interval_ms: int | None = None) -> bytes:
     payload = bytes([1 if enabled else 0])
     if interval_ms is not None:
-        payload += struct.pack("<H", max(0, min(0xFFFF, int(interval_ms))))
+        payload += struct.pack("<H", _uint16(interval_ms, "interval_ms"))
     return build_command(CMD_IMU_SET_PREVIEW, seq, payload)
 
 
@@ -635,6 +697,9 @@ def build_imu_set_preview(seq: int, enabled: bool, interval_ms: int | None = Non
 
 def parse_response(data: bytes) -> Optional[CommandResponse]:
     """Parse a RES message: [0x11] [cmd_id] [seq] [result] [payload...]"""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
     if len(data) < 4 or data[0] != PREFIX_RES:
         return None
     return CommandResponse(
@@ -645,15 +710,34 @@ def parse_response(data: bytes) -> Optional[CommandResponse]:
     )
 
 
+def parse_command(data: bytes) -> Optional[CommandRequest]:
+    """Parse a CMD message: [0x10] [cmd_id] [seq] [payload...]."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
+    if len(data) < 3 or data[0] != PREFIX_CMD:
+        return None
+    return CommandRequest(cmd_id=data[1], seq=data[2], payload=data[3:])
+
+
 def parse_status(data: bytes) -> Optional[DeviceStatus]:
     """Parse a STATUS message: [0x20] [DeviceStatus: 22B]."""
-    if len(data) < 1 + DeviceStatus.STRUCT_SIZE or data[0] != PREFIX_STATUS:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
         return None
-    return DeviceStatus.from_bytes(data[1:])
+    data = bytes(data)
+    if len(data) != 1 + DeviceStatus.STRUCT_SIZE or data[0] != PREFIX_STATUS:
+        return None
+    try:
+        return DeviceStatus.from_bytes(data[1:])
+    except ValueError:
+        return None
 
 
 def parse_camera_frame(data: bytes) -> Optional[bytes]:
     """Parse a CAMERA message: [0x21] [JPEG data...]"""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
     if len(data) < 2 or data[0] != PREFIX_CAMERA:
         return None
     return data[1:]
@@ -661,15 +745,19 @@ def parse_camera_frame(data: bytes) -> Optional[bytes]:
 
 def parse_lidar_frame(data: bytes) -> Optional[LidarFrame]:
     """Parse a LIDAR message: [0x22] [ts:8B] [count:2B] [points: count*4B]"""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
     if len(data) < 11 or data[0] != PREFIX_LIDAR:
         return None
     timestamp_us = struct.unpack_from("<Q", data, 1)[0]
     point_count = struct.unpack_from("<H", data, 9)[0]
+    expected_len = 11 + point_count * 4
+    if len(data) != expected_len:
+        return None
     points = []
     offset = 11
     for _ in range(point_count):
-        if offset + 4 > len(data):
-            break
         angle_q6, distance_mm = struct.unpack_from("<HH", data, offset)
         points.append(LidarPoint(angle_deg=angle_q6 / 64.0, distance_mm=distance_mm))
         offset += 4
@@ -678,15 +766,19 @@ def parse_lidar_frame(data: bytes) -> Optional[LidarFrame]:
 
 def parse_imu_frame(data: bytes) -> Optional[ImuFrame]:
     """Parse an IMU message: [0x23] [batch_start_us:8B] [count:1B] [samples: count*20B]."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
     if len(data) < 10 or data[0] != PREFIX_IMU:
         return None
     batch_start_us = struct.unpack_from("<Q", data, 1)[0]
     sample_count = data[9]
+    expected_len = 10 + sample_count * 20
+    if len(data) != expected_len:
+        return None
     offset = 10
     samples: list[ImuSample] = []
     for _ in range(sample_count):
-        if offset + 20 > len(data):
-            break
         ts_offset_us, ax, ay, az, gx, gy, gz, _reserved = struct.unpack_from("<IhhhhhhI", data, offset)
         samples.append(
             ImuSample(
@@ -705,16 +797,25 @@ def parse_imu_frame(data: bytes) -> Optional[ImuFrame]:
 
 def parse_sd_chunk(data: bytes) -> Optional[SdChunk]:
     """Parse an SD download chunk: [0x24] [flags:1B] [offset:4B] [total_size:4B] [bytes...]."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(data)
     if len(data) < 10 or data[0] != PREFIX_SD_CHUNK:
         return None
     flags = data[1]
     offset = struct.unpack_from("<I", data, 2)[0]
     total_size = struct.unpack_from("<I", data, 6)[0]
-    return SdChunk(flags=flags, offset=offset, total_size=total_size, data=data[10:])
+    chunk_data = data[10:]
+    if offset > total_size or offset + len(chunk_data) > total_size:
+        return None
+    return SdChunk(flags=flags, offset=offset, total_size=total_size, data=chunk_data)
 
 
 def parse_sd_entries(data: bytes) -> list[SdEntry]:
     """Parse SD_LIST payload: [count:2B] repeated [flags:1B][size:8B][path_len:2B][path:utf8]."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return []
+    data = bytes(data)
     if len(data) < 2:
         return []
     entry_count = struct.unpack_from("<H", data, 0)[0]
@@ -722,24 +823,24 @@ def parse_sd_entries(data: bytes) -> list[SdEntry]:
     entries: list[SdEntry] = []
     for _ in range(entry_count):
         if offset + 11 > len(data):
-            break
+            return []
         flags = data[offset]
         size_bytes = struct.unpack_from("<Q", data, offset + 1)[0]
         path_len = struct.unpack_from("<H", data, offset + 9)[0]
         offset += 11
         if offset + path_len > len(data):
-            break
+            return []
         path = data[offset : offset + path_len].decode("utf-8", errors="replace")
         offset += path_len
         entries.append(SdEntry(path=path, is_dir=bool(flags & 0x01), size_bytes=size_bytes))
+    if offset != len(data):
+        return []
     return entries
 
 
 # --- Handshake ---
 
 INIT_FLAG_START_STREAM = 0x01
-
-PROTOCOL_VERSION = 2
 
 
 @dataclass
@@ -752,20 +853,27 @@ class InitMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Optional["InitMessage"]:
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            return None
+        data = bytes(data)
         if len(data) < 3 or data[0] != PREFIX_INIT:
             return None
         version = data[1]
         name_len = data[2]
-        if len(data) < 3 + name_len + DeviceStatus.STRUCT_SIZE:
+        expected_len = 3 + name_len + DeviceStatus.STRUCT_SIZE
+        if name_len > MAX_DEVICE_NAME_BYTES or len(data) != expected_len:
             return None
         name = data[3 : 3 + name_len].decode("utf-8", errors="replace")
-        status = DeviceStatus.from_bytes(data[3 + name_len : 3 + name_len + DeviceStatus.STRUCT_SIZE])
+        try:
+            status = DeviceStatus.from_bytes(data[3 + name_len : expected_len])
+        except ValueError:
+            return None
         return cls(protocol_version=version, device_name=name, status=status)
 
 
 @dataclass
 class InitAckSettings:
-    """Settings sent to device via INIT_ACK (12 bytes payload)."""
+    """Settings sent to device via INIT_ACK (1-byte prefix + 12-byte payload)."""
 
     status_push_ms: int = 5000
     stream_interval_ms: int = 50
@@ -774,16 +882,22 @@ class InitAckSettings:
     camera_resolution: int = 0  # 0 = don't change
     camera_quality: int = 0  # 0 = don't change
 
-    def to_bytes(self) -> bytes:
-        return bytes([PREFIX_INIT_ACK]) + struct.pack(
-            "<HHHBBBxxx",
-            self.status_push_ms,
-            self.stream_interval_ms,
-            self.motor_rpm,
-            self.flags,
-            self.camera_resolution,
-            self.camera_quality,
+    STRUCT_FORMAT = "<HHHBBB3x"
+    STRUCT = struct.Struct(STRUCT_FORMAT)
+    STRUCT_SIZE = STRUCT.size
+
+    def payload_bytes(self) -> bytes:
+        return self.STRUCT.pack(
+            _uint16(self.status_push_ms, "status_push_ms"),
+            _uint16(self.stream_interval_ms, "stream_interval_ms"),
+            _uint16(self.motor_rpm, "motor_rpm"),
+            _uint8(self.flags, "flags"),
+            _uint8(self.camera_resolution, "camera_resolution"),
+            _uint8(self.camera_quality, "camera_quality"),
         )
+
+    def to_bytes(self) -> bytes:
+        return bytes([PREFIX_INIT_ACK]) + self.payload_bytes()
 
 
 def parse_init(data: bytes) -> Optional[InitMessage]:

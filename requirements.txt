@@ -1,2 +1,2 @@
-PyQt6
-websockets
+PyQt6>=6.5
+websockets>=13.0

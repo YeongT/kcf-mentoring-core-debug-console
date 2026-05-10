@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
 )
 
 from protocol import (
+    CAP_IMU_STREAM_CTRL,
+    CAP_TIME_SYNC,
     CAMERA_EFFECTS,
     CAMERA_PARAM_AEC_VALUE,
     CAMERA_PARAM_BRIGHTNESS,
@@ -258,7 +260,10 @@ class CameraControlPanel(QGroupBox):
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
         self.sync_init_settings()
-        self._conn.send_command(CMD_CAMERA_GET_INFO)
+        if _initial_status:
+            self._on_status(_initial_status)
+        if self._enabled:
+            self._conn.send_command(CMD_CAMERA_GET_INFO)
 
     def _on_disconnected(self) -> None:
         self._streaming = False
@@ -275,7 +280,10 @@ class CameraControlPanel(QGroupBox):
         self._streaming = bool(status.camera_streaming)
         self._set_controls_enabled(self._enabled)
         self._btn_stream.setText("Stop Stream" if self._streaming else "Start Stream")
-        self._info_label.setText("Streaming active" if self._streaming else "Camera ready")
+        if self._enabled:
+            self._info_label.setText("Streaming active" if self._streaming else "Camera ready")
+        else:
+            self._info_label.setText("Camera unavailable")
         self.sync_init_settings()
 
     def _on_response(self, data: bytes) -> None:
@@ -308,6 +316,8 @@ class CameraControlPanel(QGroupBox):
         self.sync_init_settings()
 
     def _apply_config(self) -> None:
+        if not self._enabled or not self._conn.connected:
+            return
         self._conn.send_command(
             CMD_SET_CAMERA_CONFIG,
             struct.pack("BB", int(self._resolution.currentData()), int(self._quality.currentData())),
@@ -457,7 +467,10 @@ class LidarControlPanel(QGroupBox):
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
         self.sync_init_settings()
-        self._probe()
+        if _initial_status:
+            self._on_status(_initial_status)
+        if self._enabled:
+            self._probe()
 
     def _on_disconnected(self) -> None:
         self._enabled = False
@@ -476,6 +489,9 @@ class LidarControlPanel(QGroupBox):
         self._scanning = status.scan_state != SCAN_IDLE
         self._set_controls_enabled(self._enabled)
         self._btn_scan.setText("Stop Scan" if self._scanning else "Start Scan")
+        if not self._enabled:
+            self._health.setText("Unavailable")
+            self._health.setStyleSheet("color: #F44336; font-weight: bold;")
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)
@@ -523,7 +539,7 @@ class LidarControlPanel(QGroupBox):
             self._conn.send_command(CMD_LIDAR_SET_SCAN_MODE, struct.pack("B", mode))
 
     def _probe(self) -> None:
-        if self._conn.connected:
+        if self._conn.connected and self._enabled:
             self._conn.send_command(CMD_LIDAR_GET_INFO)
             self._conn.send_command(CMD_LIDAR_GET_HEALTH)
 
@@ -547,6 +563,10 @@ class ImuControlPanel(QGroupBox):
         self._conn = connection
         self._imu_panel = imu_panel
         self._last_sync_host_ms = 0
+        self._is_previewing = False
+        self._imu_available = False
+        self._supports_imu_preview_ctrl = False
+        self._supports_time_sync = False
         self._init_ui()
         self._connect_signals()
 
@@ -555,6 +575,7 @@ class ImuControlPanel(QGroupBox):
         self._imu_panel.state_changed.connect(self._update_state)
         self._conn.device_connected.connect(self._on_connected)
         self._conn.device_disconnected.connect(self._on_disconnected)
+        self._conn.status_received.connect(self._on_status)
         self._conn.response_received.connect(self._on_response)
 
     def _init_ui(self) -> None:
@@ -642,11 +663,28 @@ class ImuControlPanel(QGroupBox):
 
     def _on_connected(self, _name: str, _initial_status: bytes) -> None:
         self._set_protocol_controls_enabled(True)
+        if _initial_status:
+            self._on_status(_initial_status)
+        else:
+            self._sync_preview_button()
         self._conn.send_command(CMD_GET_PROTOCOL_INFO)
 
     def _on_disconnected(self) -> None:
+        self._is_previewing = False
+        self._imu_available = False
+        self._supports_imu_preview_ctrl = False
+        self._supports_time_sync = False
         self._set_protocol_controls_enabled(False)
         self._protocol_info.setText("Protocol: --")
+
+    def _on_status(self, data: bytes) -> None:
+        status = parse_status(data)
+        if not status:
+            return
+        self._imu_available = status.imu_ok
+        if not self._imu_available:
+            self._is_previewing = False
+        self._sync_preview_button()
 
     def _on_response(self, data: bytes) -> None:
         resp = parse_response(data)
@@ -660,8 +698,11 @@ class ImuControlPanel(QGroupBox):
             if not info:
                 self._protocol_info.setText("Protocol info parse failed")
                 return
+            self._supports_imu_preview_ctrl = bool(info.capabilities & CAP_IMU_STREAM_CTRL)
+            self._supports_time_sync = bool(info.capabilities & CAP_TIME_SYNC)
             self._is_previewing = info.imu_preview_enabled
             self._sync_preview_button()
+            self._btn_time_sync.setEnabled(self._supports_time_sync)
             if info.imu_interval_ms:
                 self._preview_interval.setValue(max(20, min(1000, info.imu_interval_ms)))
             self._protocol_info.setText(
@@ -696,13 +737,17 @@ class ImuControlPanel(QGroupBox):
                 self._protocol_info.setText(f"IMU preview {'ON' if enabled else 'OFF'} @ {interval} ms")
 
     def _toggle_preview(self) -> None:
+        if not (self._imu_available and self._supports_imu_preview_ctrl):
+            return
         new_state = not self._is_previewing
         self._btn_toggle_preview.setEnabled(False)
         payload = struct.pack("<BH", int(new_state), self._preview_interval.value())
         self._conn.send_command(CMD_IMU_SET_PREVIEW, payload)
 
     def _sync_preview_button(self) -> None:
-        self._btn_toggle_preview.setEnabled(True)
+        enabled = self._conn.connected and self._imu_available and self._supports_imu_preview_ctrl
+        self._preview_interval.setEnabled(enabled)
+        self._btn_toggle_preview.setEnabled(enabled)
         self._btn_toggle_preview.setText("Stop Monitor" if self._is_previewing else "Start Monitor")
         if self._is_previewing:
             self._btn_toggle_preview.setStyleSheet(
@@ -713,17 +758,19 @@ class ImuControlPanel(QGroupBox):
             self._btn_toggle_preview.setStyleSheet("")
 
     def _request_time_sync(self) -> None:
+        if not self._supports_time_sync:
+            return
         self._last_sync_host_ms = int(time.monotonic() * 1000)
         self._conn.send_command(CMD_TIME_SYNC)
 
     def _set_protocol_controls_enabled(self, enabled: bool) -> None:
-        for widget in (
-            self._preview_interval,
-            self._btn_toggle_preview,
-            self._btn_protocol,
-            self._btn_time_sync,
-        ):
-            widget.setEnabled(enabled)
+        self._btn_protocol.setEnabled(enabled)
+        self._btn_time_sync.setEnabled(enabled and self._supports_time_sync)
+        if enabled:
+            self._sync_preview_button()
+        else:
+            self._preview_interval.setEnabled(False)
+            self._btn_toggle_preview.setEnabled(False)
 
     def _update_state(self, online: bool, message: str) -> None:
         # Status header removed to clean up duplicate UI. Logic preserved for future needs if any.
