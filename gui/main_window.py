@@ -26,7 +26,19 @@ from PyQt6.QtWidgets import (
 )
 
 import settings
-from protocol import CMD_GET_STATUS, CMD_IMU_SET_PREVIEW, PREFIX_CMD, DeviceStatus, parse_camera_frame, parse_imu_frame, parse_lidar_frame, parse_response, parse_status
+from protocol import (
+    CMD_GET_STATUS,
+    CMD_IMU_SET_PREVIEW,
+    CMD_START_SCAN,
+    CMD_STOP_SCAN,
+    PREFIX_CMD,
+    DeviceStatus,
+    parse_camera_frame,
+    parse_imu_frame,
+    parse_lidar_frame,
+    parse_response,
+    parse_status,
+)
 from session_logger import SessionLogger
 from udp_discovery import UdpDiscoveryListener
 from ws_server import DeviceConnection, WebSocketServer
@@ -77,6 +89,7 @@ class MainWindow(QMainWindow):
         self._tab_enabled_states: dict[str, bool] = {}
         self._current_status = DeviceStatus()
         self._command_quiet_until = 0.0
+        self._fusion_tab_hold_until = 0.0
         self._demo_mode = False
         self._simulator = PrototypeSimulator(self)
         self._session_logger = SessionLogger()
@@ -488,10 +501,14 @@ class MainWindow(QMainWindow):
         self._show_device_select()
 
     def _on_raw_data(self, direction: str, data: bytes) -> None:
-        if direction == "TX" and len(data) >= 4 and data[0] == PREFIX_CMD and data[1] == CMD_IMU_SET_PREVIEW:
-            enabled = data[3] != 0
-            self._set_imu_transfer_mode(enabled)
-            self._begin_command_quiet_window(3.0)
+        if direction == "TX" and len(data) >= 3 and data[0] == PREFIX_CMD:
+            cmd_id = data[1]
+            if cmd_id in (CMD_START_SCAN, CMD_STOP_SCAN, CMD_IMU_SET_PREVIEW):
+                self._fusion_tab_hold_until = max(self._fusion_tab_hold_until, time.monotonic() + 4.0)
+                self._begin_command_quiet_window(3.0)
+            if cmd_id == CMD_IMU_SET_PREVIEW and len(data) >= 4:
+                enabled = data[3] != 0
+                self._set_imu_transfer_mode(enabled)
         self._total_bytes += len(data)
         self._status_panel.update_data_total(self._total_bytes)
         self._dashboard_status_panel.update_data_total(self._total_bytes)
@@ -545,9 +562,9 @@ class MainWindow(QMainWindow):
         if frame:
             self._imu_panel.update_frame(frame)
             snapshot = self._imu_panel.get_snapshot()
-            _roll, _pitch, yaw = self._imu_panel.get_orientation_deg()
+            roll, pitch, yaw = self._imu_panel.get_orientation_deg()
             self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
-            self._lidar3d_panel.set_orientation(yaw)
+            self._lidar3d_panel.set_attitude(roll, pitch, yaw)
             self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
 
     def _on_response(self, data: bytes) -> None:
@@ -590,6 +607,19 @@ class MainWindow(QMainWindow):
                 "lidar3d": bool(status and status.lidar_ok and status.imu_ok),
                 "sd": bool(status and status.sd_ok and status.sd_total_mb > 0),
             }
+        lidar3d_index = self._tab_indices.get("lidar3d", -1)
+        current_is_lidar3d = self._tabs.currentIndex() == lidar3d_index
+        fusion_hold_active = time.monotonic() < self._fusion_tab_hold_until
+        if (
+            not self._demo_mode
+            and lidar3d_index >= 0
+            and (current_is_lidar3d or self._map_controls.is_mapping_active_or_pending())
+            and (fusion_hold_active or self._map_controls.is_mapping_active_or_pending())
+        ):
+            states["lidar3d"] = True
+        current_key = next((key for key, idx in self._tab_indices.items() if idx == self._tabs.currentIndex()), None)
+        if current_key and not states[current_key]:
+            self._tabs.setCurrentIndex(self._tab_indices["dashboard"])
         for key, tab_index in self._tab_indices.items():
             self._tabs.setTabEnabled(tab_index, states[key])
         if self._tab_enabled_states.get("camera") and not states.get("camera"):
@@ -919,11 +949,11 @@ class MainWindow(QMainWindow):
         self._update_sensor_tabs(status)
         self._imu_panel.update_frame(imu_frame)
         snapshot = self._imu_panel.get_snapshot()
-        _roll, _pitch, yaw = self._imu_panel.get_orientation_deg()
+        roll, pitch, yaw = self._imu_panel.get_orientation_deg()
         self._dashboard_lidar_panel.update_frame(lidar_frame)
         self._lidar_panel.update_frame(lidar_frame)
         self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
-        self._lidar3d_panel.set_orientation(yaw)
+        self._lidar3d_panel.set_attitude(roll, pitch, yaw)
         self._lidar3d_panel.update_lidar_frame(lidar_frame)
         self._map_controls.set_sensor_state(True, True)
         self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
