@@ -5,12 +5,15 @@ from __future__ import annotations
 import struct
 from typing import Callable
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout
 
 from protocol import (
+    CAP_EXTENDED_STATUS,
     CAP_IMU_STREAM_CTRL,
     CMD_GET_PROTOCOL_INFO,
+    CMD_GET_SCAN_STATS,
     CMD_GET_STATUS,
     CMD_IMU_SET_PREVIEW,
     CMD_LIDAR_SET_SCAN_MODE,
@@ -24,6 +27,7 @@ from protocol import (
     SCAN_MODE_EXPRESS,
     SCAN_MODE_NAMES,
     SCAN_MODE_STANDARD,
+    ScanStats,
     parse_response,
     parse_status,
 )
@@ -49,13 +53,18 @@ class MappingControlPanel(QGroupBox):
         self._lidar_available = False
         self._imu_available = False
         self._supports_imu_preview_ctrl = False
+        self._supports_extended_status = False
         self._protocol_known = False
         self._scanning = False
         self._imu_previewing = False
         self._scan_state = SCAN_IDLE
         self._last_lidar_rpm = 0
+        self._last_stats: ScanStats | None = None
         self._pending_scan_target: bool | None = None
         self._pending_imu_target: bool | None = None
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._request_scan_stats)
         self._init_ui()
         self._connect_signals()
         self._sync_controls()
@@ -74,7 +83,7 @@ class MappingControlPanel(QGroupBox):
 
         grid = QGridLayout()
         self._labels: dict[str, QLabel] = {}
-        for row, (title, key) in enumerate((("Frames", "frames"), ("Yaw", "yaw"), ("Window", "window"))):
+        for row, (title, key) in enumerate((("Frames", "frames"), ("Points", "points"), ("Yaw", "yaw"))):
             label = QLabel(title)
             label.setStyleSheet("color: #78909C;")
             value = QLabel("--")
@@ -145,6 +154,32 @@ class MappingControlPanel(QGroupBox):
         action_row.addWidget(self._btn_clear)
         layout.addLayout(action_row)
 
+        diag_box = QGroupBox("Scan Diagnostics")
+        diag_grid = QGridLayout()
+        diag_grid.setHorizontalSpacing(8)
+        diag_grid.setVerticalSpacing(6)
+        diag_grid.setContentsMargins(8, 12, 8, 8)
+        self._diag_labels: dict[str, QLabel] = {}
+        for row, (title, key) in enumerate(
+            (
+                ("Flow", "flow"),
+                ("Wire", "wire"),
+                ("UART", "uart"),
+                ("Drops", "drops"),
+                ("SD", "sd"),
+            )
+        ):
+            label = QLabel(title)
+            label.setStyleSheet("color: #78909C;")
+            value = QLabel("--")
+            value.setFont(QFont("Consolas", 8))
+            value.setStyleSheet("color: #CFD8DC;")
+            diag_grid.addWidget(label, row, 0)
+            diag_grid.addWidget(value, row, 1)
+            self._diag_labels[key] = value
+        diag_box.setLayout(diag_grid)
+        layout.addWidget(diag_box)
+
         layout.addStretch()
         self.setLayout(layout)
 
@@ -157,8 +192,11 @@ class MappingControlPanel(QGroupBox):
     def _on_connected(self, _name: str, initial_status: bytes) -> None:
         self._protocol_known = False
         self._supports_imu_preview_ctrl = False
+        self._supports_extended_status = False
+        self._last_stats = None
         self._pending_scan_target = None
         self._pending_imu_target = None
+        self._reset_diag_labels()
         self.sync_init_settings()
         if initial_status:
             self._on_status(initial_status)
@@ -170,13 +208,17 @@ class MappingControlPanel(QGroupBox):
         self._lidar_available = False
         self._imu_available = False
         self._supports_imu_preview_ctrl = False
+        self._supports_extended_status = False
         self._protocol_known = False
         self._scanning = False
         self._imu_previewing = False
         self._scan_state = SCAN_IDLE
         self._last_lidar_rpm = 0
+        self._last_stats = None
         self._pending_scan_target = None
         self._pending_imu_target = None
+        self._stats_timer.stop()
+        self._reset_diag_labels()
         self._sync_controls()
 
     def _on_status(self, data: bytes) -> None:
@@ -198,10 +240,22 @@ class MappingControlPanel(QGroupBox):
                 self._show_status("Status response parse failed", self._STYLE_ERROR)
             return
 
+        if resp.cmd_id == CMD_GET_SCAN_STATS:
+            if not resp.ok:
+                self._show_status(f"Scan stats failed: {resp.result_name}", self._STYLE_ERROR)
+                return
+            stats = ScanStats.from_bytes(resp.payload)
+            if not stats:
+                self._show_status("Scan stats parse failed", self._STYLE_ERROR)
+                return
+            self._apply_scan_stats(stats)
+            return
+
         if resp.cmd_id == CMD_GET_PROTOCOL_INFO:
             self._protocol_known = True
             if not resp.ok:
                 self._supports_imu_preview_ctrl = False
+                self._supports_extended_status = False
                 self._imu_previewing = False
                 self._sync_controls()
                 self._show_status(f"Protocol info failed: {resp.result_name}", self._STYLE_ERROR)
@@ -209,10 +263,12 @@ class MappingControlPanel(QGroupBox):
             info = ProtocolInfo.from_bytes(resp.payload)
             if not info:
                 self._supports_imu_preview_ctrl = False
+                self._supports_extended_status = False
                 self._sync_controls()
                 self._show_status("Protocol info parse failed", self._STYLE_ERROR)
                 return
             self._supports_imu_preview_ctrl = bool(info.capabilities & CAP_IMU_STREAM_CTRL)
+            self._supports_extended_status = bool(info.capabilities & CAP_EXTENDED_STATUS)
             self._imu_previewing = info.imu_preview_enabled if self._supports_imu_preview_ctrl else False
             if info.imu_interval_ms:
                 self._imu_interval.setValue(max(20, min(1000, info.imu_interval_ms)))
@@ -282,6 +338,20 @@ class MappingControlPanel(QGroupBox):
             self._imu_previewing = False
         if self._pending_scan_target is not None and self._pending_scan_target == self._scanning:
             self._pending_scan_target = None
+        self._sync_controls()
+
+    def _apply_scan_stats(self, stats: ScanStats) -> None:
+        self._last_stats = stats
+        self._lidar_available = stats.lidar_available
+        self._imu_available = stats.imu_available
+        self._scan_state = stats.scan_state if stats.lidar_available else SCAN_IDLE
+        self._scanning = stats.scan_state == SCAN_SCANNING if stats.lidar_available else False
+        self._imu_previewing = stats.imu_preview_enabled if stats.imu_available else False
+        if self._pending_scan_target is not None and self._pending_scan_target == self._scanning:
+            self._pending_scan_target = None
+        if self._pending_imu_target is not None and self._pending_imu_target == self._imu_previewing:
+            self._pending_imu_target = None
+        self._sync_diag_labels(stats)
         self._sync_controls()
 
     def _toggle_mapping(self) -> None:
@@ -370,6 +440,9 @@ class MappingControlPanel(QGroupBox):
     def _mapping_active(self) -> bool:
         return self._scanning and self._imu_previewing
 
+    def is_mapping_active_or_pending(self) -> bool:
+        return self._mapping_active() or self._pending_scan_target is not None or self._pending_imu_target is not None
+
     def _sync_controls(self) -> None:
         connected = self._conn.connected
         lidar_ready = self._can_control_lidar()
@@ -397,6 +470,7 @@ class MappingControlPanel(QGroupBox):
         self._imu_interval.setEnabled(imu_ready)
         self._btn_apply.setEnabled((lidar_ready or imu_ready) and not command_pending)
         self._sync_status_label()
+        self._sync_stats_timer()
 
     def _sync_status_label(self) -> None:
         if self._demo_running:
@@ -410,13 +484,77 @@ class MappingControlPanel(QGroupBox):
         elif self._lidar_available and self._imu_available and not self._supports_imu_preview_ctrl:
             self._show_status("IMU monitor control unsupported", self._STYLE_WARN)
         elif self._mapping_active():
-            self._show_status(f"3D mapping live | RPM {self._last_lidar_rpm}", self._STYLE_OK)
+            if self._last_stats:
+                flow = "flow OK" if self._last_stats.data_flow_ok else "waiting for flow"
+                style = self._STYLE_OK if self._last_stats.data_flow_ok else self._STYLE_WARN
+                self._show_status(
+                    f"3D mapping live | {flow} | L {self._last_stats.lidar_frame_count} I {self._last_stats.imu_batch_count}",
+                    style,
+                )
+            else:
+                self._show_status(f"3D mapping live | RPM {self._last_lidar_rpm}", self._STYLE_OK)
+        elif self.is_mapping_active_or_pending():
+            self._show_status("3D mapping command pending", self._STYLE_WARN)
         elif self._lidar_available and self._imu_available:
             self._show_status("Fusion input ready", self._STYLE_OK)
         elif self._lidar_available:
             self._show_status("Partial input: LiDAR only", self._STYLE_WARN)
         else:
             self._show_status("Partial input: IMU only", self._STYLE_WARN)
+
+    def _sync_stats_timer(self) -> None:
+        should_poll = self._conn.connected and self._supports_extended_status and self.is_mapping_active_or_pending()
+        if should_poll:
+            if not self._stats_timer.isActive():
+                self._stats_timer.start()
+                self._request_scan_stats()
+        elif self._stats_timer.isActive():
+            self._stats_timer.stop()
+
+    def _request_scan_stats(self) -> None:
+        if self._conn.connected and self._supports_extended_status:
+            self._send(CMD_GET_SCAN_STATS)
+
+    def _reset_diag_labels(self) -> None:
+        if not hasattr(self, "_diag_labels"):
+            return
+        for label in self._diag_labels.values():
+            label.setText("--")
+            label.setStyleSheet("color: #CFD8DC;")
+
+    def _sync_diag_labels(self, stats: ScanStats | None = None) -> None:
+        stats = stats or self._last_stats
+        if not stats:
+            self._reset_diag_labels()
+            return
+
+        flow_text = "OK" if stats.data_flow_ok else "WAIT"
+        if stats.ws_send_failure_count or stats.ws_queue_replaced_count:
+            flow_text = "TX DROP"
+        flow_style = self._STYLE_OK if stats.data_flow_ok else self._STYLE_WARN
+        if stats.ws_send_failure_count or stats.ws_queue_replaced_count:
+            flow_style = self._STYLE_ERROR
+        self._diag_labels["flow"].setText(
+            f"{flow_text} | session {stats.scan_session_id} | {stats.scan_duration_ms // 1000}s"
+        )
+        self._diag_labels["flow"].setStyleSheet(flow_style)
+
+        self._diag_labels["wire"].setText(
+            f"L {stats.ws_lidar_frames_sent} / {stats.ws_lidar_bytes_sent // 1024} KiB, "
+            f"I {stats.ws_imu_frames_sent} / {stats.ws_imu_bytes_sent // 1024} KiB"
+        )
+        self._diag_labels["uart"].setText(
+            f"{stats.lidar_uart_bytes_received // 1024} KiB, "
+            f"age {stats.lidar_last_uart_byte_age_ms} ms, parse {stats.lidar_parse_reject_count}"
+        )
+        self._diag_labels["drops"].setText(
+            f"ws {stats.ws_send_failure_count}, q {stats.ws_queue_replaced_count}, "
+            f"prev L {stats.lidar_preview_dropped} I {stats.imu_preview_dropped}"
+        )
+        self._diag_labels["sd"].setText(
+            f"{stats.sd_bytes_written // 1024} KiB, rec L {stats.sd_lidar_record_count} I {stats.sd_imu_record_count}, "
+            f"err {stats.sd_write_error_count}"
+        )
 
     def _show_status(self, text: str, style: str) -> None:
         self._status.setText(text)
@@ -453,6 +591,6 @@ class MappingControlPanel(QGroupBox):
 
     def update_snapshot(self, snapshot: dict) -> None:
         self._labels["frames"].setText(str(snapshot["frames"]))
+        self._labels["points"].setText(str(snapshot.get("point_count", 0)))
         self._labels["yaw"].setText(f'{snapshot["yaw_deg"]:.1f} deg')
-        self._labels["window"].setText(f'{snapshot["horizon_s"]:.1f} s')
 

@@ -62,6 +62,8 @@ CAP_SD_BROWSER = 1 << 4
 CAP_SD_DOWNLOAD = 1 << 5
 CAP_TIME_SYNC = 1 << 6
 CAP_IMU_STREAM_CTRL = 1 << 7
+CAP_EXTENDED_STATUS = 1 << 8
+CAP_DEBUG_TELEMETRY = 1 << 9
 
 CAPABILITY_NAMES = {
     CAP_STATUS_PUSH: "status",
@@ -72,6 +74,8 @@ CAPABILITY_NAMES = {
     CAP_SD_DOWNLOAD: "sd-download",
     CAP_TIME_SYNC: "time-sync",
     CAP_IMU_STREAM_CTRL: "imu-stream-ctrl",
+    CAP_EXTENDED_STATUS: "extended-status",
+    CAP_DEBUG_TELEMETRY: "debug-telemetry",
 }
 
 # --- Command IDs --- RPLiDAR (0x20~0x2F)
@@ -100,6 +104,12 @@ CMD_SD_DOWNLOAD = 0x41
 # --- Command IDs --- IMU (0x50~0x5F)
 CMD_IMU_SET_PREVIEW = 0x50
 CMD_IMU_CALIBRATE = 0x51
+
+# --- Command IDs --- Diagnostics / extended status (0x60~0x6F)
+CMD_GET_RUNTIME_STATUS = 0x60
+CMD_GET_SCAN_STATS = 0x61
+CMD_SET_DEBUG_MODE = 0x62
+CMD_GET_DEBUG_SNAPSHOT = 0x63
 
 # Camera param IDs for CMD_CAMERA_SET_PARAM
 CAMERA_PARAM_BRIGHTNESS = 0x01  # -2 to 2
@@ -159,6 +169,10 @@ CMD_NAMES = {
     CMD_SD_DOWNLOAD: "SD_DOWNLOAD",
     CMD_IMU_SET_PREVIEW: "IMU_SET_PREVIEW",
     CMD_IMU_CALIBRATE: "IMU_CALIBRATE",
+    CMD_GET_RUNTIME_STATUS: "GET_RUNTIME_STATUS",
+    CMD_GET_SCAN_STATS: "GET_SCAN_STATS",
+    CMD_SET_DEBUG_MODE: "SET_DEBUG_MODE",
+    CMD_GET_DEBUG_SNAPSHOT: "GET_DEBUG_SNAPSHOT",
 }
 
 
@@ -499,6 +513,317 @@ class TimeSyncInfo:
         return cls(
             device_time_us=struct.unpack_from("<Q", data, 0)[0],
             device_tick_ms=struct.unpack_from("<I", data, 8)[0],
+        )
+
+
+@dataclass
+class RuntimeStatus:
+    """Parsed GET_RUNTIME_STATUS response payload."""
+
+    version: int = 0
+    debug_mode_enabled: bool = False
+    wifi_connected: bool = False
+    websocket_connected: bool = False
+    sensor_flags: int = 0
+    scan_state: int = 0
+    camera_resolution: int = 0
+    camera_quality: int = 0
+    camera_streaming: bool = False
+    wifi_rssi: int = -127
+    status_push_ms: int = 0
+    requested_lidar_rpm: int = 0
+    lidar_rpm: int = 0
+    uptime_ms: int = 0
+    free_heap: int = 0
+    min_free_heap: int = 0
+    psram_free: int = 0
+    psram_total: int = 0
+    sd_free_mb: int = 0
+    sd_total_mb: int = 0
+    scan_duration_ms: int = 0
+    scan_session_id: int = 0
+
+    STRUCT_FORMAT = "<BBBBBBBBBbHHHIIIIIIIII"
+    STRUCT = struct.Struct(STRUCT_FORMAT)
+    STRUCT_SIZE = STRUCT.size
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Optional["RuntimeStatus"]:
+        data = _bytes_like(data)
+        if len(data) != cls.STRUCT_SIZE:
+            return None
+        values = cls.STRUCT.unpack_from(data, 0)
+        return cls(
+            version=values[0],
+            debug_mode_enabled=bool(values[1]),
+            wifi_connected=bool(values[2]),
+            websocket_connected=bool(values[3]),
+            sensor_flags=values[4],
+            scan_state=values[5],
+            camera_resolution=values[6],
+            camera_quality=values[7],
+            camera_streaming=bool(values[8]),
+            wifi_rssi=values[9],
+            status_push_ms=values[10],
+            requested_lidar_rpm=values[11],
+            lidar_rpm=values[12],
+            uptime_ms=values[13],
+            free_heap=values[14],
+            min_free_heap=values[15],
+            psram_free=values[16],
+            psram_total=values[17],
+            sd_free_mb=values[18],
+            sd_total_mb=values[19],
+            scan_duration_ms=values[20],
+            scan_session_id=values[21],
+        )
+
+
+@dataclass
+class ScanStats:
+    """Parsed GET_SCAN_STATS response payload."""
+
+    version: int = 0
+    scan_state: int = 0
+    recording_active: bool = False
+    imu_sampling: bool = False
+    imu_preview_enabled: bool = False
+    lidar_available: bool = False
+    imu_available: bool = False
+    sd_mounted: bool = False
+    scan_session_id: int = 0
+    scan_duration_ms: int = 0
+    lidar_frame_count: int = 0
+    lidar_last_frame_age_ms: int = 0xFFFFFFFF
+    lidar_last_frame_point_count: int = 0
+    lidar_driver_total_frames: int = 0
+    lidar_driver_total_points: int = 0
+    lidar_receive_timeout_count: int = 0
+    lidar_uart_bytes_received: int = 0
+    lidar_last_uart_byte_age_ms: int = 0xFFFFFFFF
+    lidar_descriptor_error_count: int = 0
+    lidar_parse_reject_count: int = 0
+    lidar_express_checksum_error_count: int = 0
+    lidar_preview_sent: int = 0
+    lidar_preview_dropped: int = 0
+    imu_batch_count: int = 0
+    imu_last_batch_age_ms: int = 0xFFFFFFFF
+    imu_driver_total_batches: int = 0
+    imu_driver_total_samples: int = 0
+    imu_read_failure_count: int = 0
+    imu_preview_sent: int = 0
+    imu_preview_dropped: int = 0
+    camera_frame_sent: int = 0
+    camera_frame_dropped: int = 0
+    ws_lidar_frames_sent: int = 0
+    ws_lidar_bytes_sent: int = 0
+    ws_imu_frames_sent: int = 0
+    ws_imu_bytes_sent: int = 0
+    ws_camera_frames_sent: int = 0
+    ws_camera_bytes_sent: int = 0
+    ws_send_failure_count: int = 0
+    ws_queue_replaced_count: int = 0
+    sd_lidar_dropped: int = 0
+    sd_imu_dropped: int = 0
+    sd_queue_depth: int = 0
+    sd_queue_free: int = 0
+    sd_bytes_written: int = 0
+    sd_lidar_record_count: int = 0
+    sd_imu_record_count: int = 0
+    sd_raw_write_count: int = 0
+    sd_write_error_count: int = 0
+    last_scan_start_result: int = RESULT_ERROR
+    last_scan_stop_result: int = RESULT_ERROR
+
+    STRUCT_FORMAT = (
+        "<BBBBBBBB"
+        + "I" * 5
+        + "Q" * 4
+        + "I"
+        + "Q" * 3
+        + "I" * 4
+        + "Q" * 3
+        + "I" * 4
+        + "Q" * 8
+        + "I" * 4
+        + "Q" * 5
+        + "BBBB"
+    )
+    STRUCT = struct.Struct(STRUCT_FORMAT)
+    STRUCT_SIZE = STRUCT.size
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Optional["ScanStats"]:
+        data = _bytes_like(data)
+        if len(data) != cls.STRUCT_SIZE:
+            return None
+        v = cls.STRUCT.unpack_from(data, 0)
+        return cls(
+            version=v[0],
+            scan_state=v[1],
+            recording_active=bool(v[2]),
+            imu_sampling=bool(v[3]),
+            imu_preview_enabled=bool(v[4]),
+            lidar_available=bool(v[5]),
+            imu_available=bool(v[6]),
+            sd_mounted=bool(v[7]),
+            scan_session_id=v[8],
+            scan_duration_ms=v[9],
+            lidar_frame_count=v[10],
+            lidar_last_frame_age_ms=v[11],
+            lidar_last_frame_point_count=v[12],
+            lidar_driver_total_frames=v[13],
+            lidar_driver_total_points=v[14],
+            lidar_receive_timeout_count=v[15],
+            lidar_uart_bytes_received=v[16],
+            lidar_last_uart_byte_age_ms=v[17],
+            lidar_descriptor_error_count=v[18],
+            lidar_parse_reject_count=v[19],
+            lidar_express_checksum_error_count=v[20],
+            lidar_preview_sent=v[21],
+            lidar_preview_dropped=v[22],
+            imu_batch_count=v[23],
+            imu_last_batch_age_ms=v[24],
+            imu_driver_total_batches=v[25],
+            imu_driver_total_samples=v[26],
+            imu_read_failure_count=v[27],
+            imu_preview_sent=v[28],
+            imu_preview_dropped=v[29],
+            camera_frame_sent=v[30],
+            camera_frame_dropped=v[31],
+            ws_lidar_frames_sent=v[32],
+            ws_lidar_bytes_sent=v[33],
+            ws_imu_frames_sent=v[34],
+            ws_imu_bytes_sent=v[35],
+            ws_camera_frames_sent=v[36],
+            ws_camera_bytes_sent=v[37],
+            ws_send_failure_count=v[38],
+            ws_queue_replaced_count=v[39],
+            sd_lidar_dropped=v[40],
+            sd_imu_dropped=v[41],
+            sd_queue_depth=v[42],
+            sd_queue_free=v[43],
+            sd_bytes_written=v[44],
+            sd_lidar_record_count=v[45],
+            sd_imu_record_count=v[46],
+            sd_raw_write_count=v[47],
+            sd_write_error_count=v[48],
+            last_scan_start_result=v[49],
+            last_scan_stop_result=v[50],
+        )
+
+    @property
+    def data_flow_ok(self) -> bool:
+        return (
+            self.scan_state == SCAN_SCANNING
+            and self.lidar_frame_count > 0
+            and self.ws_lidar_frames_sent > 0
+            and self.ws_send_failure_count == 0
+        )
+
+
+@dataclass
+class DebugSnapshot:
+    """Parsed GET_DEBUG_SNAPSHOT response payload."""
+
+    version: int = 0
+    debug_mode_enabled: bool = False
+    wifi_connected: bool = False
+    websocket_connected: bool = False
+    websocket_handshake_done: bool = False
+    health_monitor_running: bool = False
+    sd_write_task_running: bool = False
+    camera_task_running: bool = False
+    uptime_ms: int = 0
+    free_heap: int = 0
+    min_free_heap: int = 0
+    largest_free_block: int = 0
+    psram_free: int = 0
+    psram_total: int = 0
+    psram_largest_free_block: int = 0
+    sd_queue_depth: int = 0
+    sd_queue_free: int = 0
+    ws_camera_queue_depth: int = 0
+    ws_lidar_queue_depth: int = 0
+    ws_telemetry_queue_depth: int = 0
+    ws_status_push_ms: int = 0
+    ws_binary_frames_sent: int = 0
+    ws_binary_bytes_sent: int = 0
+    ws_binary_send_failures: int = 0
+    ws_queue_replaced_frames: int = 0
+    ws_queue_send_failures: int = 0
+    ws_enqueue_rejections: int = 0
+    ws_control_frames_received: int = 0
+    ws_control_frames_dropped: int = 0
+    sd_lidar_dropped: int = 0
+    sd_imu_dropped: int = 0
+    preview_lidar_dropped: int = 0
+    preview_imu_dropped: int = 0
+    camera_frame_dropped: int = 0
+    lidar_receive_timeout_count: int = 0
+    lidar_uart_bytes_received: int = 0
+    lidar_last_uart_byte_age_ms: int = 0xFFFFFFFF
+    lidar_descriptor_error_count: int = 0
+    lidar_parse_reject_count: int = 0
+    lidar_express_checksum_error_count: int = 0
+    imu_read_failure_count: int = 0
+    sd_write_error_count: int = 0
+    debug_snapshot_count: int = 0
+
+    STRUCT_FORMAT = "<BBBBBBBB" + "I" * 13 + "Q" * 8 + "I" * 5 + "Q" * 2 + "I" + "Q" * 5 + "I"
+    STRUCT = struct.Struct(STRUCT_FORMAT)
+    STRUCT_SIZE = STRUCT.size
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Optional["DebugSnapshot"]:
+        data = _bytes_like(data)
+        if len(data) != cls.STRUCT_SIZE:
+            return None
+        v = cls.STRUCT.unpack_from(data, 0)
+        return cls(
+            version=v[0],
+            debug_mode_enabled=bool(v[1]),
+            wifi_connected=bool(v[2]),
+            websocket_connected=bool(v[3]),
+            websocket_handshake_done=bool(v[4]),
+            health_monitor_running=bool(v[5]),
+            sd_write_task_running=bool(v[6]),
+            camera_task_running=bool(v[7]),
+            uptime_ms=v[8],
+            free_heap=v[9],
+            min_free_heap=v[10],
+            largest_free_block=v[11],
+            psram_free=v[12],
+            psram_total=v[13],
+            psram_largest_free_block=v[14],
+            sd_queue_depth=v[15],
+            sd_queue_free=v[16],
+            ws_camera_queue_depth=v[17],
+            ws_lidar_queue_depth=v[18],
+            ws_telemetry_queue_depth=v[19],
+            ws_status_push_ms=v[20],
+            ws_binary_frames_sent=v[21],
+            ws_binary_bytes_sent=v[22],
+            ws_binary_send_failures=v[23],
+            ws_queue_replaced_frames=v[24],
+            ws_queue_send_failures=v[25],
+            ws_enqueue_rejections=v[26],
+            ws_control_frames_received=v[27],
+            ws_control_frames_dropped=v[28],
+            sd_lidar_dropped=v[29],
+            sd_imu_dropped=v[30],
+            preview_lidar_dropped=v[31],
+            preview_imu_dropped=v[32],
+            camera_frame_dropped=v[33],
+            lidar_receive_timeout_count=v[34],
+            lidar_uart_bytes_received=v[35],
+            lidar_last_uart_byte_age_ms=v[36],
+            lidar_descriptor_error_count=v[37],
+            lidar_parse_reject_count=v[38],
+            lidar_express_checksum_error_count=v[39],
+            imu_read_failure_count=v[40],
+            sd_write_error_count=v[41],
+            debug_snapshot_count=v[42],
         )
 
 

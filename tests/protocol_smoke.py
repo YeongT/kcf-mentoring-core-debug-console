@@ -9,6 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from protocol import (
+    CAP_DEBUG_TELEMETRY,
+    CAP_EXTENDED_STATUS,
+    CMD_GET_DEBUG_SNAPSHOT,
+    CMD_GET_RUNTIME_STATUS,
+    CMD_GET_SCAN_STATS,
+    CMD_SET_DEBUG_MODE,
     CMD_START_STREAM,
     INIT_FLAG_START_STREAM,
     PREFIX_INIT,
@@ -19,8 +25,11 @@ from protocol import (
     PROTOCOL_VERSION,
     RESULT_OK,
     SCAN_SCANNING,
+    DebugSnapshot,
     DeviceStatus,
     InitAckSettings,
+    RuntimeStatus,
+    ScanStats,
     build_command,
     parse_init,
     parse_response,
@@ -78,6 +87,26 @@ def run() -> None:
     response = parse_response(bytes([PREFIX_RES, CMD_START_STREAM, 7, RESULT_OK]))
     assert response is not None
     assert response.ok
+
+    assert CAP_EXTENDED_STATUS == 1 << 8
+    assert CAP_DEBUG_TELEMETRY == 1 << 9
+    assert build_command(CMD_GET_RUNTIME_STATUS, 8) == bytes([0x10, CMD_GET_RUNTIME_STATUS, 8])
+    assert build_command(CMD_GET_SCAN_STATS, 9) == bytes([0x10, CMD_GET_SCAN_STATS, 9])
+    assert build_command(CMD_SET_DEBUG_MODE, 10, b"\x01") == bytes([0x10, CMD_SET_DEBUG_MODE, 10, 0x01])
+    assert build_command(CMD_GET_DEBUG_SNAPSHOT, 11) == bytes([0x10, CMD_GET_DEBUG_SNAPSHOT, 11])
+
+    runtime = RuntimeStatus.from_bytes(bytes(RuntimeStatus.STRUCT_SIZE))
+    assert runtime is not None
+    assert RuntimeStatus.STRUCT_SIZE == 52
+
+    scan_stats = ScanStats.from_bytes(bytes(ScanStats.STRUCT_SIZE))
+    assert scan_stats is not None
+    assert ScanStats.STRUCT_SIZE == 268
+    assert not scan_stats.data_flow_ok
+
+    debug_snapshot = DebugSnapshot.from_bytes(bytes(DebugSnapshot.STRUCT_SIZE))
+    assert debug_snapshot is not None
+    assert DebugSnapshot.STRUCT_SIZE == 208
 
     chunk = parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 7, 0x01, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2]))
     assert chunk is not None
