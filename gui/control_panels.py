@@ -404,7 +404,8 @@ class OverviewControlPanel(QGroupBox):
         self._runtime_labels["flow"].setText(
             f"{flow} | L {stats.lidar_frame_count} frames / {stats.ws_lidar_frames_sent} sent | "
             f"I {stats.imu_batch_count} batches / {stats.ws_imu_frames_sent} sent | "
-            f"drop ws {stats.ws_send_failure_count} q {stats.ws_queue_replaced_count}"
+            f"C cap {stats.camera_frame_captured} rec {stats.sd_camera_record_count} | "
+            f"drop ws {stats.ws_send_failure_count} q {stats.ws_queue_replaced_count} cam {stats.camera_record_dropped}"
         )
 
     def _update_debug_snapshot(self, snapshot: DebugSnapshot) -> None:
@@ -422,14 +423,15 @@ class OverviewControlPanel(QGroupBox):
         )
         self._debug_labels["drops"].setText(
             f"q repl {snapshot.ws_queue_replaced_frames} | enqueue {snapshot.ws_enqueue_rejections} | "
-            f"prev L/I {snapshot.preview_lidar_dropped}/{snapshot.preview_imu_dropped}"
+            f"prev L/I {snapshot.preview_lidar_dropped}/{snapshot.preview_imu_dropped} | "
+            f"cam rec {snapshot.camera_record_dropped}"
         )
         self._debug_labels["lidar"].setText(
             f"uart {snapshot.lidar_uart_bytes_received // 1024} KiB | age {snapshot.lidar_last_uart_byte_age_ms} ms | "
             f"parse {snapshot.lidar_parse_reject_count} | chk {snapshot.lidar_express_checksum_error_count}"
         )
         self._debug_labels["debug_storage"].setText(
-            f"SD drop L/I {snapshot.sd_lidar_dropped}/{snapshot.sd_imu_dropped} | "
+            f"SD drop L/I/C {snapshot.sd_lidar_dropped}/{snapshot.sd_imu_dropped}/{snapshot.sd_camera_dropped} | "
             f"write err {snapshot.sd_write_error_count} | IMU read fail {snapshot.imu_read_failure_count}"
         )
 

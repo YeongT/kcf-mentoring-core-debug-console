@@ -615,6 +615,9 @@ class ScanStats:
     imu_preview_dropped: int = 0
     camera_frame_sent: int = 0
     camera_frame_dropped: int = 0
+    camera_frame_captured: int = 0
+    camera_last_frame_age_ms: int = 0xFFFFFFFF
+    camera_record_dropped: int = 0
     ws_lidar_frames_sent: int = 0
     ws_lidar_bytes_sent: int = 0
     ws_imu_frames_sent: int = 0
@@ -625,11 +628,13 @@ class ScanStats:
     ws_queue_replaced_count: int = 0
     sd_lidar_dropped: int = 0
     sd_imu_dropped: int = 0
+    sd_camera_dropped: int = 0
     sd_queue_depth: int = 0
     sd_queue_free: int = 0
     sd_bytes_written: int = 0
     sd_lidar_record_count: int = 0
     sd_imu_record_count: int = 0
+    sd_camera_record_count: int = 0
     sd_raw_write_count: int = 0
     sd_write_error_count: int = 0
     last_scan_start_result: int = RESULT_ERROR
@@ -643,10 +648,10 @@ class ScanStats:
         + "Q" * 3
         + "I" * 4
         + "Q" * 3
-        + "I" * 4
+        + "I" * 7
         + "Q" * 8
-        + "I" * 4
-        + "Q" * 5
+        + "I" * 5
+        + "Q" * 6
         + "BBBB"
     )
     STRUCT = struct.Struct(STRUCT_FORMAT)
@@ -691,25 +696,30 @@ class ScanStats:
             imu_preview_dropped=v[29],
             camera_frame_sent=v[30],
             camera_frame_dropped=v[31],
-            ws_lidar_frames_sent=v[32],
-            ws_lidar_bytes_sent=v[33],
-            ws_imu_frames_sent=v[34],
-            ws_imu_bytes_sent=v[35],
-            ws_camera_frames_sent=v[36],
-            ws_camera_bytes_sent=v[37],
-            ws_send_failure_count=v[38],
-            ws_queue_replaced_count=v[39],
-            sd_lidar_dropped=v[40],
-            sd_imu_dropped=v[41],
-            sd_queue_depth=v[42],
-            sd_queue_free=v[43],
-            sd_bytes_written=v[44],
-            sd_lidar_record_count=v[45],
-            sd_imu_record_count=v[46],
-            sd_raw_write_count=v[47],
-            sd_write_error_count=v[48],
-            last_scan_start_result=v[49],
-            last_scan_stop_result=v[50],
+            camera_frame_captured=v[32],
+            camera_last_frame_age_ms=v[33],
+            camera_record_dropped=v[34],
+            ws_lidar_frames_sent=v[35],
+            ws_lidar_bytes_sent=v[36],
+            ws_imu_frames_sent=v[37],
+            ws_imu_bytes_sent=v[38],
+            ws_camera_frames_sent=v[39],
+            ws_camera_bytes_sent=v[40],
+            ws_send_failure_count=v[41],
+            ws_queue_replaced_count=v[42],
+            sd_lidar_dropped=v[43],
+            sd_imu_dropped=v[44],
+            sd_camera_dropped=v[45],
+            sd_queue_depth=v[46],
+            sd_queue_free=v[47],
+            sd_bytes_written=v[48],
+            sd_lidar_record_count=v[49],
+            sd_imu_record_count=v[50],
+            sd_camera_record_count=v[51],
+            sd_raw_write_count=v[52],
+            sd_write_error_count=v[53],
+            last_scan_start_result=v[54],
+            last_scan_stop_result=v[55],
         )
 
     @property
@@ -757,9 +767,13 @@ class DebugSnapshot:
     ws_control_frames_dropped: int = 0
     sd_lidar_dropped: int = 0
     sd_imu_dropped: int = 0
+    sd_camera_dropped: int = 0
     preview_lidar_dropped: int = 0
     preview_imu_dropped: int = 0
     camera_frame_dropped: int = 0
+    camera_frame_captured: int = 0
+    camera_last_frame_age_ms: int = 0xFFFFFFFF
+    camera_record_dropped: int = 0
     lidar_receive_timeout_count: int = 0
     lidar_uart_bytes_received: int = 0
     lidar_last_uart_byte_age_ms: int = 0xFFFFFFFF
@@ -770,7 +784,7 @@ class DebugSnapshot:
     sd_write_error_count: int = 0
     debug_snapshot_count: int = 0
 
-    STRUCT_FORMAT = "<BBBBBBBB" + "I" * 13 + "Q" * 8 + "I" * 5 + "Q" * 2 + "I" + "Q" * 5 + "I"
+    STRUCT_FORMAT = "<BBBBBBBB" + "I" * 13 + "Q" * 8 + "I" * 9 + "Q" * 2 + "I" + "Q" * 5 + "I"
     STRUCT = struct.Struct(STRUCT_FORMAT)
     STRUCT_SIZE = STRUCT.size
 
@@ -812,18 +826,22 @@ class DebugSnapshot:
             ws_control_frames_dropped=v[28],
             sd_lidar_dropped=v[29],
             sd_imu_dropped=v[30],
-            preview_lidar_dropped=v[31],
-            preview_imu_dropped=v[32],
-            camera_frame_dropped=v[33],
-            lidar_receive_timeout_count=v[34],
-            lidar_uart_bytes_received=v[35],
-            lidar_last_uart_byte_age_ms=v[36],
-            lidar_descriptor_error_count=v[37],
-            lidar_parse_reject_count=v[38],
-            lidar_express_checksum_error_count=v[39],
-            imu_read_failure_count=v[40],
-            sd_write_error_count=v[41],
-            debug_snapshot_count=v[42],
+            sd_camera_dropped=v[31],
+            preview_lidar_dropped=v[32],
+            preview_imu_dropped=v[33],
+            camera_frame_dropped=v[34],
+            camera_frame_captured=v[35],
+            camera_last_frame_age_ms=v[36],
+            camera_record_dropped=v[37],
+            lidar_receive_timeout_count=v[38],
+            lidar_uart_bytes_received=v[39],
+            lidar_last_uart_byte_age_ms=v[40],
+            lidar_descriptor_error_count=v[41],
+            lidar_parse_reject_count=v[42],
+            lidar_express_checksum_error_count=v[43],
+            imu_read_failure_count=v[44],
+            sd_write_error_count=v[45],
+            debug_snapshot_count=v[46],
         )
 
 

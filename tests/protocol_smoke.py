@@ -101,12 +101,12 @@ def run() -> None:
 
     scan_stats = ScanStats.from_bytes(bytes(ScanStats.STRUCT_SIZE))
     assert scan_stats is not None
-    assert ScanStats.STRUCT_SIZE == 268
+    assert ScanStats.STRUCT_SIZE == 292
     assert not scan_stats.data_flow_ok
 
     debug_snapshot = DebugSnapshot.from_bytes(bytes(DebugSnapshot.STRUCT_SIZE))
     assert debug_snapshot is not None
-    assert DebugSnapshot.STRUCT_SIZE == 208
+    assert DebugSnapshot.STRUCT_SIZE == 224
 
     chunk = parse_sd_chunk(bytes([PREFIX_SD_CHUNK, 7, 0x01, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2]))
     assert chunk is not None

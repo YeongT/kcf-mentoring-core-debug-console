@@ -541,7 +541,8 @@ class MappingControlPanel(QGroupBox):
 
         self._diag_labels["wire"].setText(
             f"L {stats.ws_lidar_frames_sent} / {stats.ws_lidar_bytes_sent // 1024} KiB, "
-            f"I {stats.ws_imu_frames_sent} / {stats.ws_imu_bytes_sent // 1024} KiB"
+            f"I {stats.ws_imu_frames_sent} / {stats.ws_imu_bytes_sent // 1024} KiB, "
+            f"C {stats.ws_camera_frames_sent}"
         )
         self._diag_labels["uart"].setText(
             f"{stats.lidar_uart_bytes_received // 1024} KiB, "
@@ -549,10 +550,12 @@ class MappingControlPanel(QGroupBox):
         )
         self._diag_labels["drops"].setText(
             f"ws {stats.ws_send_failure_count}, q {stats.ws_queue_replaced_count}, "
-            f"prev L {stats.lidar_preview_dropped} I {stats.imu_preview_dropped}"
+            f"prev L {stats.lidar_preview_dropped} I {stats.imu_preview_dropped}, "
+            f"cam rec {stats.camera_record_dropped}"
         )
         self._diag_labels["sd"].setText(
-            f"{stats.sd_bytes_written // 1024} KiB, rec L {stats.sd_lidar_record_count} I {stats.sd_imu_record_count}, "
+            f"{stats.sd_bytes_written // 1024} KiB, rec L {stats.sd_lidar_record_count} "
+            f"I {stats.sd_imu_record_count} C {stats.sd_camera_record_count}, "
             f"err {stats.sd_write_error_count}"
         )
 

@@ -239,6 +239,7 @@ class Lidar3DPanel(QGroupBox):
         self._pitch_deg = 0.0
         self._yaw_deg = 0.0
         self._pose_xy = (0.0, 0.0)
+        self._attitude_history = deque(maxlen=1200)  # (timestamp_us, roll_deg, pitch_deg, yaw_deg)
         self._span_m = 8.0
         self._fade_reference_s = 45.0
 
@@ -257,12 +258,20 @@ class Lidar3DPanel(QGroupBox):
             return
         sample = frame.samples[-1]
         self._yaw_deg += sample.gyro_z_dps * 0.005
-        self._sync_hud()
+        self.set_attitude(self._roll_deg, self._pitch_deg, self._yaw_deg, sample.timestamp_us)
 
-    def set_attitude(self, roll_deg: float, pitch_deg: float, yaw_deg: float) -> None:
+    def set_attitude(
+        self,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        timestamp_us: int | None = None,
+    ) -> None:
         self._roll_deg = roll_deg
         self._pitch_deg = pitch_deg
         self._yaw_deg = yaw_deg
+        if timestamp_us is not None:
+            self._attitude_history.append((timestamp_us, roll_deg, pitch_deg, yaw_deg))
         self._sync_hud()
 
     def set_orientation(self, yaw_deg: float) -> None:
@@ -277,6 +286,7 @@ class Lidar3DPanel(QGroupBox):
         self._frame_count += 1
         floor_points: list[tuple[float, float]] = []
         wall_points: list[tuple[float, float, float, float]] = []
+        roll_deg, pitch_deg, yaw_deg = self._attitude_for_timestamp(frame.timestamp_us)
 
         for point in frame.points:
             if point.distance_mm <= 0:
@@ -285,7 +295,7 @@ class Lidar3DPanel(QGroupBox):
             local_angle = math.radians(point.angle_deg)
             local_x = math.cos(local_angle) * distance_m
             local_y = math.sin(local_angle) * distance_m
-            world_x, world_y, world_z = self._rotate_body_to_world(local_x, local_y, 0.0)
+            world_x, world_y, world_z = self._rotate_body_to_world(local_x, local_y, 0.0, roll_deg, pitch_deg, yaw_deg)
             world_x += self._pose_xy[0]
             world_y += self._pose_xy[1]
             floor_points.append((world_x, world_y))
@@ -293,13 +303,52 @@ class Lidar3DPanel(QGroupBox):
 
         self._point_count += len(wall_points)
         self._wall.update_frame(wall_points)
-        self._topdown.update_frame(floor_points, self._pose_xy, self._yaw_deg)
+        self._topdown.update_frame(floor_points, self._pose_xy, yaw_deg)
         self._sync_hud()
 
-    def _rotate_body_to_world(self, x_m: float, y_m: float, z_m: float) -> tuple[float, float, float]:
-        roll = math.radians(self._roll_deg)
-        pitch = math.radians(self._pitch_deg)
-        yaw = math.radians(self._yaw_deg)
+    def _attitude_for_timestamp(self, timestamp_us: int) -> tuple[float, float, float]:
+        if timestamp_us <= 0 or not self._attitude_history:
+            return self._roll_deg, self._pitch_deg, self._yaw_deg
+
+        previous = None
+        for item in self._attitude_history:
+            if item[0] >= timestamp_us:
+                if previous is None:
+                    return item[1], item[2], item[3]
+                span = max(1, item[0] - previous[0])
+                ratio = max(0.0, min(1.0, (timestamp_us - previous[0]) / span))
+                return (
+                    previous[1] + (item[1] - previous[1]) * ratio,
+                    previous[2] + (item[2] - previous[2]) * ratio,
+                    self._interp_angle_deg(previous[3], item[3], ratio),
+                )
+            previous = item
+
+        if previous is not None:
+            return previous[1], previous[2], previous[3]
+        return self._roll_deg, self._pitch_deg, self._yaw_deg
+
+    @staticmethod
+    def _interp_angle_deg(start_deg: float, end_deg: float, ratio: float) -> float:
+        delta = end_deg - start_deg
+        while delta > 180.0:
+            delta -= 360.0
+        while delta < -180.0:
+            delta += 360.0
+        return start_deg + delta * ratio
+
+    def _rotate_body_to_world(
+        self,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> tuple[float, float, float]:
+        roll = math.radians(roll_deg)
+        pitch = math.radians(pitch_deg)
+        yaw = math.radians(yaw_deg)
         cr, sr = math.cos(roll), math.sin(roll)
         cp, sp = math.cos(pitch), math.sin(pitch)
         cy, sy = math.cos(yaw), math.sin(yaw)
@@ -329,6 +378,7 @@ class Lidar3DPanel(QGroupBox):
         self._pitch_deg = 0.0
         self._yaw_deg = 0.0
         self._pose_xy = (0.0, 0.0)
+        self._attitude_history.clear()
         self._wall.clear_map()
         self._topdown.clear_map()
         self._sync_hud()

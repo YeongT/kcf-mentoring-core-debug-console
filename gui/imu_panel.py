@@ -638,6 +638,7 @@ class ImuPanel(QGroupBox):
             "samples": self._sample_count,
             "sample_rate_hz": self._sample_rate_hz,
             "age_ms": age_ms,
+            "timestamp_us": self._last_timestamp_us,
             "roll_deg": roll_deg,
             "pitch_deg": pitch_deg,
             "yaw_deg": yaw_deg,

@@ -124,7 +124,8 @@ def _describe_message(direction: str, data: bytes) -> str:
                 if stats:
                     extra = (
                         f" session={stats.scan_session_id}, lidar={stats.lidar_frame_count}, "
-                        f"imu={stats.imu_batch_count}, ws_fail={stats.ws_send_failure_count}"
+                        f"imu={stats.imu_batch_count}, cam_rec={stats.sd_camera_record_count}, "
+                        f"ws_fail={stats.ws_send_failure_count}"
                     )
             elif resp.ok and resp.cmd_id == CMD_SET_DEBUG_MODE:
                 if resp.payload:
@@ -135,7 +136,7 @@ def _describe_message(direction: str, data: bytes) -> str:
                     extra = (
                         f" debug={int(snapshot.debug_mode_enabled)}, "
                         f"ws_fail={snapshot.ws_binary_send_failures}, "
-                        f"sd_err={snapshot.sd_write_error_count}"
+                        f"cam_drop={snapshot.camera_record_dropped}, sd_err={snapshot.sd_write_error_count}"
                     )
             return f"RES {resp.cmd_name} seq={resp.seq} {result_str}{extra}"
 

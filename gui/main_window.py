@@ -564,7 +564,7 @@ class MainWindow(QMainWindow):
             snapshot = self._imu_panel.get_snapshot()
             roll, pitch, yaw = self._imu_panel.get_orientation_deg()
             self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
-            self._lidar3d_panel.set_attitude(roll, pitch, yaw)
+            self._lidar3d_panel.set_attitude(roll, pitch, yaw, snapshot.get("timestamp_us"))
             self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
 
     def _on_response(self, data: bytes) -> None:
@@ -953,7 +953,7 @@ class MainWindow(QMainWindow):
         self._dashboard_lidar_panel.update_frame(lidar_frame)
         self._lidar_panel.update_frame(lidar_frame)
         self._lidar3d_panel.set_pose(snapshot["position"][0], snapshot["position"][1])
-        self._lidar3d_panel.set_attitude(roll, pitch, yaw)
+        self._lidar3d_panel.set_attitude(roll, pitch, yaw, snapshot.get("timestamp_us"))
         self._lidar3d_panel.update_lidar_frame(lidar_frame)
         self._map_controls.set_sensor_state(True, True)
         self._map_controls.update_snapshot(self._lidar3d_panel.get_snapshot())
