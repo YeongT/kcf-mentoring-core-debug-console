@@ -13,10 +13,10 @@ from PyQt6.QtWidgets import QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushBu
 from protocol import ImuFrame
 
 
-MOUNT_ROLL_SIGN = -1.0
+MOUNT_ROLL_SIGN = 1.0
 MOUNT_PITCH_SIGN = 1.0
-MOUNT_YAW_SIGN = -1.0
-MOUNT_DESCRIPTION = "Upside-down IMU mount"
+MOUNT_YAW_SIGN = 1.0
+MOUNT_DESCRIPTION = "Firmware body-frame IMU mount"
 
 
 def _metric_label(title: str) -> tuple[QLabel, QLabel]:
