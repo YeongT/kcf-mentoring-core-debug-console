@@ -21,8 +21,9 @@ class SessionLogger:
     inspected after the window is closed.
     """
 
-    def __init__(self, log_dir: str | Path = "logs", max_bytes: int = 20 * 1024 * 1024):
-        self._path = Path(log_dir) / f"console_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    def __init__(self, log_dir: str | Path | None = None, max_bytes: int = 20 * 1024 * 1024):
+        base_dir = Path(log_dir) if log_dir is not None else Path(__file__).resolve().parent / "logs"
+        self._path = (base_dir / f"console_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log").resolve()
         self._max_bytes = max_bytes
         self._bytes_written = 0
         self._closed = False
