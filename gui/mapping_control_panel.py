@@ -83,7 +83,9 @@ class MappingControlPanel(QGroupBox):
 
         grid = QGridLayout()
         self._labels: dict[str, QLabel] = {}
-        for row, (title, key) in enumerate((("Frames", "frames"), ("Points", "points"), ("Yaw", "yaw"))):
+        for row, (title, key) in enumerate(
+            (("Frames", "frames"), ("Points", "points"), ("Pose", "pose"), ("Yaw", "yaw"), ("Match", "match"))
+        ):
             label = QLabel(title)
             label.setStyleSheet("color: #78909C;")
             value = QLabel("--")
@@ -595,5 +597,11 @@ class MappingControlPanel(QGroupBox):
     def update_snapshot(self, snapshot: dict) -> None:
         self._labels["frames"].setText(str(snapshot["frames"]))
         self._labels["points"].setText(str(snapshot.get("point_count", 0)))
+        pose_x, pose_y = snapshot.get("pose_xy", (0.0, 0.0))
+        self._labels["pose"].setText(f"{pose_x:+.2f}, {pose_y:+.2f} m")
         self._labels["yaw"].setText(f'{snapshot["yaw_deg"]:.1f} deg')
+        state = "LOCK" if snapshot.get("match_active") else "PRED"
+        quality = float(snapshot.get("match_quality", 0.0)) * 100.0
+        cells = int(snapshot.get("map_cells", 0))
+        self._labels["match"].setText(f"{state} {quality:.0f}% / {cells} cells")
 

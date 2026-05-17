@@ -13,6 +13,89 @@ from PyQt6.QtWidgets import QFrame, QGroupBox, QHBoxLayout, QLabel, QVBoxLayout,
 from protocol import ImuFrame, LidarFrame
 
 
+class ScanMatcher2D:
+    def __init__(self):
+        self._resolution_m = 0.08
+        self._cells: set[tuple[int, int]] = set()
+        self._match_cells: set[tuple[int, int]] = set()
+        self._cell_limit = 60000
+
+    def reset(self) -> None:
+        self._cells.clear()
+        self._match_cells.clear()
+
+    @property
+    def ready(self) -> bool:
+        return len(self._cells) >= 120
+
+    @property
+    def cell_count(self) -> int:
+        return len(self._cells)
+
+    def match(
+        self,
+        local_points: list[tuple[float, float]],
+        predicted_pose: tuple[float, float, float],
+    ) -> tuple[tuple[float, float, float], float, bool]:
+        if not self.ready or len(local_points) < 20:
+            return predicted_pose, 0.0, False
+
+        sample = self._sample_points(local_points, 96)
+        pred_x, pred_y, pred_yaw = predicted_pose
+        best_pose = predicted_pose
+        best_hits = -1
+        best_score = -1.0
+
+        yaw_offsets = (-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0)
+        xy_offsets = (-0.18, -0.09, 0.0, 0.09, 0.18)
+        for yaw_offset in yaw_offsets:
+            yaw_deg = pred_yaw + yaw_offset
+            yaw = math.radians(yaw_deg)
+            cy, sy = math.cos(yaw), math.sin(yaw)
+            rotated = [(x * cy - y * sy, x * sy + y * cy) for x, y in sample]
+            for dx in xy_offsets:
+                tx = pred_x + dx
+                for dy in xy_offsets:
+                    ty = pred_y + dy
+                    hits = 0
+                    for rx, ry in rotated:
+                        if self._cell_key(rx + tx, ry + ty) in self._match_cells:
+                            hits += 1
+                    penalty = 0.015 * abs(yaw_offset) + 0.8 * math.hypot(dx, dy)
+                    score = hits - penalty
+                    if score > best_score:
+                        best_score = score
+                        best_hits = hits
+                        best_pose = (tx, ty, yaw_deg)
+
+        quality = max(0.0, min(1.0, best_hits / max(1, len(sample))))
+        accepted = best_hits >= max(8, int(len(sample) * 0.10))
+        return best_pose if accepted else predicted_pose, quality, accepted
+
+    def add_points(self, world_points: list[tuple[float, float]]) -> None:
+        if len(self._cells) > self._cell_limit:
+            self.reset()
+        for x_m, y_m in self._sample_points(world_points, 360):
+            cell = self._cell_key(x_m, y_m)
+            if cell in self._cells:
+                continue
+            self._cells.add(cell)
+            cx, cy = cell
+            for nx in (cx - 1, cx, cx + 1):
+                for ny in (cy - 1, cy, cy + 1):
+                    self._match_cells.add((nx, ny))
+
+    def _cell_key(self, x_m: float, y_m: float) -> tuple[int, int]:
+        return (int(round(x_m / self._resolution_m)), int(round(y_m / self._resolution_m)))
+
+    @staticmethod
+    def _sample_points(points: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
+        if len(points) <= limit:
+            return points
+        step = max(1, len(points) // limit)
+        return points[::step][:limit]
+
+
 class FixedWallCanvas(QWidget):
     def __init__(self):
         super().__init__()
@@ -193,7 +276,9 @@ class HudStrip(QFrame):
         for key, title in (
             ("frames", "Frames"),
             ("points", "Points"),
+            ("pose", "Pose"),
             ("attitude", "Attitude"),
+            ("match", "Match"),
             ("span", "Span"),
         ):
             title_label = QLabel(title)
@@ -212,11 +297,23 @@ class HudStrip(QFrame):
         layout.addStretch()
         self.setLayout(layout)
 
-    def update_values(self, frames: int, points: int, attitude: tuple[float, float, float], span_m: float) -> None:
+    def update_values(
+        self,
+        frames: int,
+        points: int,
+        attitude: tuple[float, float, float],
+        pose_xy: tuple[float, float],
+        match_quality: float,
+        match_active: bool,
+        span_m: float,
+    ) -> None:
         roll_deg, pitch_deg, yaw_deg = attitude
         self._labels["frames"].setText(str(frames))
         self._labels["points"].setText(str(points))
+        self._labels["pose"].setText(f"{pose_xy[0]:+.2f}, {pose_xy[1]:+.2f} m")
         self._labels["attitude"].setText(f"R {roll_deg:+.1f} / P {pitch_deg:+.1f} / Y {yaw_deg:+.1f} deg")
+        state = "LOCK" if match_active else "PRED"
+        self._labels["match"].setText(f"{state} {match_quality * 100:.0f}%")
         self._labels["span"].setText(f"{span_m:.1f} m fixed")
 
 
@@ -227,8 +324,8 @@ class Lidar3DPanel(QGroupBox):
         self._topdown = TopDownMapCanvas()
         self._hud = HudStrip()
         self._caption = QLabel(
-            "The map view is fixed. IMU roll, pitch, and yaw rotate incoming LiDAR points into the world frame; "
-            "the canvas itself does not rotate or recenter during scanning."
+            "The map view is fixed. IMU roll/pitch levels the scan, IMU yaw predicts short motion, and LiDAR "
+            "scan matching corrects yaw/xy before points are accumulated."
         )
         self._caption.setStyleSheet("color: #8AA0B6;")
         self._caption.setWordWrap(True)
@@ -238,8 +335,13 @@ class Lidar3DPanel(QGroupBox):
         self._roll_deg = 0.0
         self._pitch_deg = 0.0
         self._yaw_deg = 0.0
+        self._slam_yaw_deg = 0.0
+        self._last_match_imu_yaw_deg: float | None = None
+        self._match_quality = 0.0
+        self._match_active = False
         self._pose_xy = (0.0, 0.0)
         self._attitude_history = deque(maxlen=1200)  # (timestamp_us, roll_deg, pitch_deg, yaw_deg)
+        self._matcher = ScanMatcher2D()
         self._span_m = 8.0
         self._fade_reference_s = 45.0
 
@@ -287,24 +389,43 @@ class Lidar3DPanel(QGroupBox):
         floor_points: list[tuple[float, float]] = []
         wall_points: list[tuple[float, float, float, float]] = []
         roll_deg, pitch_deg, yaw_deg = self._attitude_for_timestamp(frame.timestamp_us)
+        predicted_yaw = self._predict_slam_yaw(yaw_deg)
+        level_points: list[tuple[float, float, float, float]] = []
 
         for point in frame.points:
             if point.distance_mm <= 0:
                 continue
             distance_m = point.distance_mm / 1000.0
+            if distance_m < 0.15 or distance_m > 8.0:
+                continue
             local_angle = math.radians(point.angle_deg)
             local_x = math.cos(local_angle) * distance_m
             local_y = math.sin(local_angle) * distance_m
-            world_x, world_y, world_z = self._rotate_body_to_world(local_x, local_y, 0.0, roll_deg, pitch_deg, yaw_deg)
-            world_x += self._pose_xy[0]
-            world_y += self._pose_xy[1]
+            level_points.append((*self._rotate_roll_pitch(local_x, local_y, 0.0, roll_deg, pitch_deg), distance_m))
+
+        match_points = [(x_m, y_m) for x_m, y_m, _z_m, distance_m in level_points if 0.25 <= distance_m <= 6.0]
+        predicted_pose = (self._pose_xy[0], self._pose_xy[1], predicted_yaw)
+        matched_pose, self._match_quality, self._match_active = self._matcher.match(match_points, predicted_pose)
+        self._pose_xy = (matched_pose[0], matched_pose[1])
+        self._slam_yaw_deg = matched_pose[2]
+        self._last_match_imu_yaw_deg = yaw_deg
+
+        for level_x, level_y, level_z, distance_m in level_points:
+            world_x, world_y = self._rotate_yaw_translate(level_x, level_y, self._slam_yaw_deg, self._pose_xy)
+            world_z = level_z
             floor_points.append((world_x, world_y))
             wall_points.append((world_x, world_y, world_z, distance_m))
 
+        self._matcher.add_points(floor_points)
         self._point_count += len(wall_points)
         self._wall.update_frame(wall_points)
-        self._topdown.update_frame(floor_points, self._pose_xy, yaw_deg)
+        self._topdown.update_frame(floor_points, self._pose_xy, self._slam_yaw_deg)
         self._sync_hud()
+
+    def _predict_slam_yaw(self, imu_yaw_deg: float) -> float:
+        if self._last_match_imu_yaw_deg is None:
+            return imu_yaw_deg
+        return self._slam_yaw_deg + self._angle_delta_deg(imu_yaw_deg, self._last_match_imu_yaw_deg)
 
     def _attitude_for_timestamp(self, timestamp_us: int) -> tuple[float, float, float]:
         if timestamp_us <= 0 or not self._attitude_history:
@@ -330,12 +451,49 @@ class Lidar3DPanel(QGroupBox):
 
     @staticmethod
     def _interp_angle_deg(start_deg: float, end_deg: float, ratio: float) -> float:
-        delta = end_deg - start_deg
+        return start_deg + Lidar3DPanel._angle_delta_deg(end_deg, start_deg) * ratio
+
+    @staticmethod
+    def _angle_delta_deg(value_deg: float, baseline_deg: float) -> float:
+        delta = value_deg - baseline_deg
         while delta > 180.0:
             delta -= 360.0
         while delta < -180.0:
             delta += 360.0
-        return start_deg + delta * ratio
+        return delta
+
+    def _rotate_roll_pitch(
+        self,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        roll_deg: float,
+        pitch_deg: float,
+    ) -> tuple[float, float, float]:
+        roll = math.radians(roll_deg)
+        pitch = math.radians(pitch_deg)
+        cr, sr = math.cos(roll), math.sin(roll)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+
+        x1 = x_m
+        y1 = y_m * cr - z_m * sr
+        z1 = y_m * sr + z_m * cr
+
+        x2 = x1 * cp + z1 * sp
+        y2 = y1
+        z2 = -x1 * sp + z1 * cp
+        return x2, y2, z2
+
+    @staticmethod
+    def _rotate_yaw_translate(
+        x_m: float,
+        y_m: float,
+        yaw_deg: float,
+        pose_xy: tuple[float, float],
+    ) -> tuple[float, float]:
+        yaw = math.radians(yaw_deg)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        return (x_m * cy - y_m * sy + pose_xy[0], x_m * sy + y_m * cy + pose_xy[1])
 
     def _rotate_body_to_world(
         self,
@@ -346,28 +504,18 @@ class Lidar3DPanel(QGroupBox):
         pitch_deg: float,
         yaw_deg: float,
     ) -> tuple[float, float, float]:
-        roll = math.radians(roll_deg)
-        pitch = math.radians(pitch_deg)
-        yaw = math.radians(yaw_deg)
-        cr, sr = math.cos(roll), math.sin(roll)
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-
-        x1 = x_m
-        y1 = y_m * cr - z_m * sr
-        z1 = y_m * sr + z_m * cr
-
-        x2 = x1 * cp + z1 * sp
-        y2 = y1
-        z2 = -x1 * sp + z1 * cp
-
-        return (x2 * cy - y2 * sy, x2 * sy + y2 * cy, z2)
+        level_x, level_y, level_z = self._rotate_roll_pitch(x_m, y_m, z_m, roll_deg, pitch_deg)
+        world_x, world_y = self._rotate_yaw_translate(level_x, level_y, yaw_deg, (0.0, 0.0))
+        return world_x, world_y, level_z
 
     def _sync_hud(self) -> None:
         self._hud.update_values(
             self._frame_count,
             self._point_count,
-            (self._roll_deg, self._pitch_deg, self._yaw_deg),
+            (self._roll_deg, self._pitch_deg, self._slam_yaw_deg),
+            self._pose_xy,
+            self._match_quality,
+            self._match_active,
             self._span_m,
         )
 
@@ -377,8 +525,13 @@ class Lidar3DPanel(QGroupBox):
         self._roll_deg = 0.0
         self._pitch_deg = 0.0
         self._yaw_deg = 0.0
+        self._slam_yaw_deg = 0.0
+        self._last_match_imu_yaw_deg = None
+        self._match_quality = 0.0
+        self._match_active = False
         self._pose_xy = (0.0, 0.0)
         self._attitude_history.clear()
+        self._matcher.reset()
         self._wall.clear_map()
         self._topdown.clear_map()
         self._sync_hud()
@@ -397,8 +550,12 @@ class Lidar3DPanel(QGroupBox):
             "point_count": self._point_count,
             "roll_deg": self._roll_deg,
             "pitch_deg": self._pitch_deg,
-            "yaw_deg": self._yaw_deg,
+            "yaw_deg": self._slam_yaw_deg,
+            "imu_yaw_deg": self._yaw_deg,
             "pose_xy": self._pose_xy,
+            "match_quality": self._match_quality,
+            "match_active": self._match_active,
+            "map_cells": self._matcher.cell_count,
             "horizon_s": self._fade_reference_s,
             "span_m": self._span_m,
         }
