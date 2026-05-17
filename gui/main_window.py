@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
         dashboard_bottom_layout.addWidget(self._dashboard_status_panel, 5)
         dashboard_bottom_layout.addWidget(self._dashboard_command_panel, 5)
         dashboard_bottom.setLayout(dashboard_bottom_layout)
-        dashboard_bottom.setMaximumHeight(300)
+        dashboard_bottom.setMaximumHeight(420)
         dashboard_layout.addWidget(dashboard_bottom, 0)
 
         dashboard_tab.setLayout(dashboard_layout)

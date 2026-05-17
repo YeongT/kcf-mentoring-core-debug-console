@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 import time
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
 )
 
 from protocol import (
+    CAP_DEBUG_TELEMETRY,
+    CAP_EXTENDED_STATUS,
     CAP_IMU_STREAM_CTRL,
     CAP_TIME_SYNC,
     CAMERA_EFFECTS,
@@ -38,7 +40,10 @@ from protocol import (
     CMD_CAMERA_SET_PARAM,
     CMD_CAPTURE_FRAME,
     CMD_GET_DEVICE_INFO,
+    CMD_GET_DEBUG_SNAPSHOT,
     CMD_GET_PROTOCOL_INFO,
+    CMD_GET_RUNTIME_STATUS,
+    CMD_GET_SCAN_STATS,
     CMD_GET_STATUS,
     CMD_IMU_CALIBRATE,
     CMD_IMU_SET_PREVIEW,
@@ -48,6 +53,7 @@ from protocol import (
     CMD_LIDAR_SET_SCAN_MODE,
     CMD_REBOOT,
     CMD_SET_CAMERA_CONFIG,
+    CMD_SET_DEBUG_MODE,
     CMD_SET_MOTOR_RPM,
     CMD_START_SCAN,
     CMD_START_STREAM,
@@ -57,15 +63,18 @@ from protocol import (
     DEFAULT_CAMERA_QUALITY,
     DEFAULT_CAMERA_RESOLUTION,
     DeviceInfo,
+    DebugSnapshot,
     CameraInfo,
     INIT_FLAG_START_STREAM,
     LidarHealth,
     LidarInfo,
     ProtocolInfo,
+    RuntimeStatus,
     SCAN_SCANNING,
     SCAN_MODE_EXPRESS,
     SCAN_MODE_STANDARD,
     TimeSyncInfo,
+    ScanStats,
     parse_response,
     parse_status,
 )
@@ -80,6 +89,15 @@ class OverviewControlPanel(QGroupBox):
         super().__init__("Dashboard Controls")
         self._conn = connection
         self._connected_buttons: list[QPushButton] = []
+        self._supports_extended_status = False
+        self._supports_debug_telemetry = False
+        self._debug_enabled = False
+        self._runtime_timer = QTimer(self)
+        self._runtime_timer.setInterval(2500)
+        self._runtime_timer.timeout.connect(self._poll_extended_status)
+        self._debug_timer = QTimer(self)
+        self._debug_timer.setInterval(2500)
+        self._debug_timer.timeout.connect(self._request_debug_snapshot)
         self._init_ui()
         self._connect_signals()
         self._sync_connected_state(False)
@@ -95,15 +113,22 @@ class OverviewControlPanel(QGroupBox):
 
         buttons = [
             ("Get Status", lambda: self._conn.send_command(CMD_GET_STATUS)),
+            ("Protocol Info", self._request_protocol_info),
+            ("Runtime", self._request_runtime_status),
+            ("Scan Stats", self._request_scan_stats),
             ("Device Info", lambda: self._conn.send_command(CMD_GET_DEVICE_INFO)),
+            ("Enable Debug", self._toggle_debug_mode),
+            ("Debug Snapshot", self._request_debug_snapshot),
             ("Reconnect", self._conn.disconnect),
             ("Reboot", lambda: self._conn.send_command(CMD_REBOOT)),
             ("Reset View", self.reset_requested.emit),
         ]
+        self._buttons: dict[str, QPushButton] = {}
         for idx, (title, callback) in enumerate(buttons):
             button = QPushButton(title)
             button.clicked.connect(callback)
             grid.addWidget(button, idx // 2, idx % 2)
+            self._buttons[title] = button
             if title != "Reset View":
                 self._connected_buttons.append(button)
         layout.addLayout(grid)
@@ -118,6 +143,68 @@ class OverviewControlPanel(QGroupBox):
         self._device_info.setStyleSheet("color: #78909C;")
         self._device_info.setWordWrap(True)
         layout.addWidget(self._device_info)
+
+        diag_box = QGroupBox("Protocol Diagnostics")
+        diag_layout = QVBoxLayout()
+        diag_layout.setSpacing(6)
+        diag_layout.setContentsMargins(8, 12, 8, 8)
+
+        self._protocol_info = QLabel("Protocol: --")
+        self._protocol_info.setFont(QFont("Consolas", 8))
+        self._protocol_info.setStyleSheet("color: #78909C;")
+        self._protocol_info.setWordWrap(True)
+        diag_layout.addWidget(self._protocol_info)
+
+        runtime_grid = QGridLayout()
+        runtime_grid.setHorizontalSpacing(8)
+        runtime_grid.setVerticalSpacing(4)
+        self._runtime_labels: dict[str, QLabel] = {}
+        for row, (title, key) in enumerate(
+            (
+                ("Runtime", "runtime"),
+                ("Memory", "memory"),
+                ("Scan", "scan"),
+                ("Flow", "flow"),
+                ("Storage", "storage"),
+            )
+        ):
+            label = QLabel(title)
+            label.setStyleSheet("color: #78909C;")
+            value = QLabel("--")
+            value.setFont(QFont("Consolas", 8))
+            value.setStyleSheet("color: #CFD8DC;")
+            value.setWordWrap(True)
+            runtime_grid.addWidget(label, row, 0)
+            runtime_grid.addWidget(value, row, 1)
+            self._runtime_labels[key] = value
+        diag_layout.addLayout(runtime_grid)
+
+        debug_grid = QGridLayout()
+        debug_grid.setHorizontalSpacing(8)
+        debug_grid.setVerticalSpacing(4)
+        self._debug_labels: dict[str, QLabel] = {}
+        for row, (title, key) in enumerate(
+            (
+                ("Tasks", "tasks"),
+                ("Queues", "queues"),
+                ("Wire", "wire"),
+                ("Drops", "drops"),
+                ("LiDAR", "lidar"),
+                ("Storage", "debug_storage"),
+            )
+        ):
+            label = QLabel(title)
+            label.setStyleSheet("color: #78909C;")
+            value = QLabel("--")
+            value.setFont(QFont("Consolas", 8))
+            value.setStyleSheet("color: #CFD8DC;")
+            value.setWordWrap(True)
+            debug_grid.addWidget(label, row, 0)
+            debug_grid.addWidget(value, row, 1)
+            self._debug_labels[key] = value
+        diag_layout.addLayout(debug_grid)
+        diag_box.setLayout(diag_layout)
+        layout.addWidget(diag_box)
         self.setLayout(layout)
 
     def _connect_signals(self) -> None:
@@ -126,10 +213,20 @@ class OverviewControlPanel(QGroupBox):
         self._conn.device_disconnected.connect(self._on_disconnected)
 
     def _on_connected(self, device_name: str, _initial_status: bytes) -> None:
+        self._supports_extended_status = False
+        self._supports_debug_telemetry = False
+        self._debug_enabled = False
         self._sync_connected_state(True)
+        self._sync_diag_controls()
         self._info.setText(f"Connected to {device_name}")
+        self._request_protocol_info()
 
     def _on_disconnected(self) -> None:
+        self._runtime_timer.stop()
+        self._debug_timer.stop()
+        self._supports_extended_status = False
+        self._supports_debug_telemetry = False
+        self._debug_enabled = False
         self._sync_connected_state(False)
         self.reset()
         self._info.setText("Disconnected")
@@ -137,23 +234,220 @@ class OverviewControlPanel(QGroupBox):
     def _sync_connected_state(self, connected: bool) -> None:
         for button in self._connected_buttons:
             button.setEnabled(connected)
+        if hasattr(self, "_buttons"):
+            self._sync_diag_controls()
 
     def _on_response(self, data: bytes) -> None:
         if not self._conn.connected:
             return
         resp = parse_response(data)
-        if not resp or resp.cmd_id != CMD_GET_DEVICE_INFO or not resp.ok:
+        if not resp:
             return
-        info = DeviceInfo.from_bytes(resp.payload)
-        if not info:
+
+        if resp.cmd_id == CMD_GET_PROTOCOL_INFO:
+            if not resp.ok:
+                self._protocol_info.setText(f"Protocol info failed: {resp.result_name}")
+                self._supports_extended_status = False
+                self._supports_debug_telemetry = False
+                self._sync_diag_controls()
+                return
+            info = ProtocolInfo.from_bytes(resp.payload)
+            if not info:
+                self._protocol_info.setText("Protocol info parse failed")
+                self._sync_diag_controls()
+                return
+            self._supports_extended_status = bool(info.capabilities & CAP_EXTENDED_STATUS)
+            self._supports_debug_telemetry = bool(info.capabilities & CAP_DEBUG_TELEMETRY)
+            self._protocol_info.setText(
+                f"Protocol v{info.version} | push {info.status_push_ms} ms | max {info.max_payload_hint} B\n"
+                f"Caps: {info.capability_str}"
+            )
+            self._sync_diag_controls()
+            if self._supports_extended_status:
+                self._request_runtime_status()
+                self._request_scan_stats()
             return
-        self._device_info.setText(
-            f"{info.device_name} | RSSI {info.wifi_rssi} dBm | Heap {info.free_heap // 1024}K | "
-            f"PSRAM {info.psram_free // (1024 * 1024)}M free"
+
+        if resp.cmd_id == CMD_GET_RUNTIME_STATUS:
+            if not resp.ok:
+                self._runtime_labels["runtime"].setText(f"Runtime failed: {resp.result_name}")
+                return
+            status = RuntimeStatus.from_bytes(resp.payload)
+            if not status:
+                self._runtime_labels["runtime"].setText("Runtime parse failed")
+                return
+            self._debug_enabled = status.debug_mode_enabled
+            self._update_runtime_status(status)
+            if not self._debug_enabled:
+                self._reset_debug_labels()
+            self._sync_diag_controls()
+            return
+
+        if resp.cmd_id == CMD_GET_SCAN_STATS:
+            if not resp.ok:
+                self._runtime_labels["flow"].setText(f"Scan stats failed: {resp.result_name}")
+                return
+            stats = ScanStats.from_bytes(resp.payload)
+            if not stats:
+                self._runtime_labels["flow"].setText("Scan stats parse failed")
+                return
+            self._update_scan_stats(stats)
+            return
+
+        if resp.cmd_id == CMD_SET_DEBUG_MODE:
+            if not resp.ok:
+                self._protocol_info.setText(f"Debug mode failed: {resp.result_name}")
+                self._sync_diag_controls()
+                return
+            self._debug_enabled = bool(resp.payload[0]) if resp.payload else self._debug_enabled
+            self._protocol_info.setText(f"Debug mode {'ON' if self._debug_enabled else 'OFF'}")
+            self._sync_diag_controls()
+            self._request_runtime_status()
+            if self._debug_enabled:
+                self._request_debug_snapshot()
+            else:
+                self._reset_debug_labels()
+            return
+
+        if resp.cmd_id == CMD_GET_DEBUG_SNAPSHOT:
+            if not resp.ok:
+                self._debug_labels["tasks"].setText(f"Debug snapshot failed: {resp.result_name}")
+                return
+            snapshot = DebugSnapshot.from_bytes(resp.payload)
+            if not snapshot:
+                self._debug_labels["tasks"].setText("Debug snapshot parse failed")
+                return
+            self._debug_enabled = snapshot.debug_mode_enabled
+            self._update_debug_snapshot(snapshot)
+            self._sync_diag_controls()
+            return
+
+        if resp.cmd_id == CMD_GET_DEVICE_INFO and resp.ok:
+            info = DeviceInfo.from_bytes(resp.payload)
+            if not info:
+                return
+            self._device_info.setText(
+                f"{info.device_name} | RSSI {info.wifi_rssi} dBm | Heap {info.free_heap // 1024}K | "
+                f"PSRAM {info.psram_free // (1024 * 1024)}M free"
+            )
+
+    def _request_protocol_info(self) -> None:
+        if self._conn.connected:
+            self._conn.send_command(CMD_GET_PROTOCOL_INFO)
+
+    def _poll_extended_status(self) -> None:
+        self._request_runtime_status()
+        self._request_scan_stats()
+
+    def _request_runtime_status(self) -> None:
+        if self._conn.connected and self._supports_extended_status:
+            self._conn.send_command(CMD_GET_RUNTIME_STATUS)
+
+    def _request_scan_stats(self) -> None:
+        if self._conn.connected and self._supports_extended_status:
+            self._conn.send_command(CMD_GET_SCAN_STATS)
+
+    def _toggle_debug_mode(self) -> None:
+        if self._conn.connected and self._supports_debug_telemetry:
+            self._conn.send_command(CMD_SET_DEBUG_MODE, bytes([0x00 if self._debug_enabled else 0x01]))
+
+    def _request_debug_snapshot(self) -> None:
+        if self._conn.connected and self._supports_debug_telemetry and self._debug_enabled:
+            self._conn.send_command(CMD_GET_DEBUG_SNAPSHOT)
+
+    def _sync_diag_controls(self) -> None:
+        if not hasattr(self, "_buttons"):
+            return
+        connected = self._conn.connected
+        self._buttons["Runtime"].setEnabled(connected and self._supports_extended_status)
+        self._buttons["Scan Stats"].setEnabled(connected and self._supports_extended_status)
+        self._buttons["Enable Debug"].setEnabled(connected and self._supports_debug_telemetry)
+        self._buttons["Enable Debug"].setText("Disable Debug" if self._debug_enabled else "Enable Debug")
+        self._buttons["Debug Snapshot"].setEnabled(
+            connected and self._supports_debug_telemetry and self._debug_enabled
         )
+
+        runtime_poll = connected and self._supports_extended_status
+        if runtime_poll and not self._runtime_timer.isActive():
+            self._runtime_timer.start()
+        elif not runtime_poll and self._runtime_timer.isActive():
+            self._runtime_timer.stop()
+
+        debug_poll = connected and self._supports_debug_telemetry and self._debug_enabled
+        if debug_poll and not self._debug_timer.isActive():
+            self._debug_timer.start()
+        elif not debug_poll and self._debug_timer.isActive():
+            self._debug_timer.stop()
+
+    def _update_runtime_status(self, status: RuntimeStatus) -> None:
+        self._runtime_labels["runtime"].setText(
+            f"up {status.uptime_ms // 1000}s | WiFi {'ON' if status.wifi_connected else 'OFF'} "
+            f"{status.wifi_rssi} dBm | WS {'ON' if status.websocket_connected else 'OFF'} | "
+            f"debug {'ON' if status.debug_mode_enabled else 'OFF'}"
+        )
+        self._runtime_labels["memory"].setText(
+            f"heap {status.free_heap // 1024}K / min {status.min_free_heap // 1024}K | "
+            f"psram {status.psram_free // 1024}K / {status.psram_total // 1024}K"
+        )
+        scan_name = "SCANNING" if status.scan_state == SCAN_SCANNING else "IDLE" if status.scan_state == 0 else str(status.scan_state)
+        self._runtime_labels["scan"].setText(
+            f"{scan_name} | rpm {status.lidar_rpm}/{status.requested_lidar_rpm} | "
+            f"session {status.scan_session_id} | {status.scan_duration_ms // 1000}s"
+        )
+        self._runtime_labels["storage"].setText(
+            f"SD {status.sd_free_mb}/{status.sd_total_mb} MB | status push {status.status_push_ms} ms | "
+            f"camera {'ON' if status.camera_streaming else 'OFF'}"
+        )
+
+    def _update_scan_stats(self, stats: ScanStats) -> None:
+        flow = "OK" if stats.data_flow_ok else "WAIT"
+        self._runtime_labels["flow"].setText(
+            f"{flow} | L {stats.lidar_frame_count} frames / {stats.ws_lidar_frames_sent} sent | "
+            f"I {stats.imu_batch_count} batches / {stats.ws_imu_frames_sent} sent | "
+            f"drop ws {stats.ws_send_failure_count} q {stats.ws_queue_replaced_count}"
+        )
+
+    def _update_debug_snapshot(self, snapshot: DebugSnapshot) -> None:
+        self._debug_labels["tasks"].setText(
+            f"health {int(snapshot.health_monitor_running)} | sd {int(snapshot.sd_write_task_running)} | "
+            f"cam {int(snapshot.camera_task_running)} | count {snapshot.debug_snapshot_count}"
+        )
+        self._debug_labels["queues"].setText(
+            f"ws C/L/T {snapshot.ws_camera_queue_depth}/{snapshot.ws_lidar_queue_depth}/"
+            f"{snapshot.ws_telemetry_queue_depth} | sd {snapshot.sd_queue_depth}/{snapshot.sd_queue_free}"
+        )
+        self._debug_labels["wire"].setText(
+            f"frames {snapshot.ws_binary_frames_sent} | bytes {snapshot.ws_binary_bytes_sent // 1024} KiB | "
+            f"fail {snapshot.ws_binary_send_failures}"
+        )
+        self._debug_labels["drops"].setText(
+            f"q repl {snapshot.ws_queue_replaced_frames} | enqueue {snapshot.ws_enqueue_rejections} | "
+            f"prev L/I {snapshot.preview_lidar_dropped}/{snapshot.preview_imu_dropped}"
+        )
+        self._debug_labels["lidar"].setText(
+            f"uart {snapshot.lidar_uart_bytes_received // 1024} KiB | age {snapshot.lidar_last_uart_byte_age_ms} ms | "
+            f"parse {snapshot.lidar_parse_reject_count} | chk {snapshot.lidar_express_checksum_error_count}"
+        )
+        self._debug_labels["debug_storage"].setText(
+            f"SD drop L/I {snapshot.sd_lidar_dropped}/{snapshot.sd_imu_dropped} | "
+            f"write err {snapshot.sd_write_error_count} | IMU read fail {snapshot.imu_read_failure_count}"
+        )
+
+    def _reset_debug_labels(self) -> None:
+        if hasattr(self, "_debug_labels"):
+            for label in self._debug_labels.values():
+                label.setText("--")
 
     def reset(self) -> None:
         self._device_info.setText("--")
+        if hasattr(self, "_protocol_info"):
+            self._protocol_info.setText("Protocol: --")
+        if hasattr(self, "_runtime_labels"):
+            for label in self._runtime_labels.values():
+                label.setText("--")
+        self._reset_debug_labels()
+        if hasattr(self, "_buttons"):
+            self._sync_diag_controls()
 
 
 class CameraControlPanel(QGroupBox):

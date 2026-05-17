@@ -23,11 +23,20 @@ from protocol import (
     PREFIX_IMU,
     PREFIX_SD_CHUNK,
     CMD_NAMES,
+    CMD_GET_DEBUG_SNAPSHOT,
+    CMD_GET_PROTOCOL_INFO,
+    CMD_GET_RUNTIME_STATUS,
+    CMD_GET_SCAN_STATS,
     CMD_SD_DOWNLOAD,
     CMD_SD_LIST,
+    CMD_SET_DEBUG_MODE,
     RESULT_OK,
     SCAN_STATE_NAMES,
+    DebugSnapshot,
     INIT_FLAG_START_STREAM,
+    ProtocolInfo,
+    RuntimeStatus,
+    ScanStats,
     format_hex,
     parse_init,
     parse_imu_frame,
@@ -82,6 +91,8 @@ def _describe_message(direction: str, data: bytes) -> str:
         elif data[1] == 0x05 and len(data) >= 5:  # START_STREAM
             interval = struct.unpack_from("<H", data, 3)[0]
             extra = f" interval={interval}ms"
+        elif data[1] == CMD_SET_DEBUG_MODE and len(data) >= 4:
+            extra = f" enabled={int(data[3] != 0)}"
         return f"CMD {cmd_name} seq={seq}{extra}"
 
     if prefix == PREFIX_RES and len(data) >= 4:
@@ -96,6 +107,36 @@ def _describe_message(direction: str, data: bytes) -> str:
                     f" scan={st.scan_state_name}, rpm={st.lidar_rpm}, "
                     f"frames={st.frame_count}, stream={st.streaming_str}"
                 )
+            elif resp.ok and resp.cmd_id == CMD_GET_PROTOCOL_INFO:
+                info = ProtocolInfo.from_bytes(resp.payload)
+                if info:
+                    extra = f" v{info.version}, caps={info.capability_str}"
+            elif resp.ok and resp.cmd_id == CMD_GET_RUNTIME_STATUS:
+                status = RuntimeStatus.from_bytes(resp.payload)
+                if status:
+                    scan = SCAN_STATE_NAMES.get(status.scan_state, str(status.scan_state))
+                    extra = (
+                        f" scan={scan}, debug={int(status.debug_mode_enabled)}, "
+                        f"heap={status.free_heap // 1024}K, rssi={status.wifi_rssi}dBm"
+                    )
+            elif resp.ok and resp.cmd_id == CMD_GET_SCAN_STATS:
+                stats = ScanStats.from_bytes(resp.payload)
+                if stats:
+                    extra = (
+                        f" session={stats.scan_session_id}, lidar={stats.lidar_frame_count}, "
+                        f"imu={stats.imu_batch_count}, ws_fail={stats.ws_send_failure_count}"
+                    )
+            elif resp.ok and resp.cmd_id == CMD_SET_DEBUG_MODE:
+                if resp.payload:
+                    extra = f" debug={int(resp.payload[0] != 0)}"
+            elif resp.ok and resp.cmd_id == CMD_GET_DEBUG_SNAPSHOT:
+                snapshot = DebugSnapshot.from_bytes(resp.payload)
+                if snapshot:
+                    extra = (
+                        f" debug={int(snapshot.debug_mode_enabled)}, "
+                        f"ws_fail={snapshot.ws_binary_send_failures}, "
+                        f"sd_err={snapshot.sd_write_error_count}"
+                    )
             return f"RES {resp.cmd_name} seq={resp.seq} {result_str}{extra}"
 
     if prefix == PREFIX_STATUS:
