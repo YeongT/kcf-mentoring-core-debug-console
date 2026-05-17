@@ -57,19 +57,23 @@ class ScanMatcher2D:
                 tx = pred_x + dx
                 for dy in xy_offsets:
                     ty = pred_y + dy
-                    hits = 0
+                    exact_hits = 0
+                    near_hits = 0
                     for rx, ry in rotated:
-                        if self._cell_key(rx + tx, ry + ty) in self._match_cells:
-                            hits += 1
-                    penalty = 0.015 * abs(yaw_offset) + 0.8 * math.hypot(dx, dy)
-                    score = hits - penalty
+                        cell = self._cell_key(rx + tx, ry + ty)
+                        if cell in self._cells:
+                            exact_hits += 1
+                        elif cell in self._match_cells:
+                            near_hits += 1
+                    penalty = 0.03 * abs(yaw_offset) + 1.2 * math.hypot(dx, dy)
+                    score = exact_hits * 2.0 + near_hits * 0.25 - penalty
                     if score > best_score:
                         best_score = score
-                        best_hits = hits
+                        best_hits = exact_hits
                         best_pose = (tx, ty, yaw_deg)
 
         quality = max(0.0, min(1.0, best_hits / max(1, len(sample))))
-        accepted = best_hits >= max(8, int(len(sample) * 0.10))
+        accepted = best_hits >= max(10, int(len(sample) * 0.14))
         return best_pose if accepted else predicted_pose, quality, accepted
 
     def add_points(self, world_points: list[tuple[float, float]]) -> None:
@@ -103,6 +107,7 @@ class FixedWallCanvas(QWidget):
         self._wall_half_width_m = 4.0
         self._z_min_m = -1.5
         self._z_max_m = 2.5
+        self._height_deadband_m = 0.08
         self._fade_reference_s = 45.0
         self.setMinimumHeight(340)
         self.setStyleSheet("background-color: #08111C; border: 1px solid #203042; border-radius: 8px;")
@@ -163,14 +168,31 @@ class FixedWallCanvas(QWidget):
             return
 
         now = time.monotonic()
+        projected: dict[tuple[int, int], tuple[float, float, float, float, float]] = {}
         for forward_m, lateral_m, height_m, distance_m, stamp in self._points:
             if abs(lateral_m) > self._wall_half_width_m or height_m < self._z_min_m or height_m > self._z_max_m:
                 continue
+            if abs(height_m) < self._height_deadband_m:
+                continue
             sx = x_center + lateral_m / self._wall_half_width_m * half_width_px
             sy = rect.bottom() - (height_m - self._z_min_m) / z_span * rect.height()
+            key = (int(round(sx)), int(round(sy)))
+            depth_m = abs(forward_m)
+            previous = projected.get(key)
+            if previous is None or depth_m < abs(previous[0]):
+                projected[key] = (forward_m, sx, sy, distance_m, stamp)
+
+        if not projected:
+            painter.setPen(QColor("#5E7388"))
+            painter.setFont(QFont("Consolas", 10))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Tilt or sweep the scanner to accumulate wall height")
+            painter.end()
+            return
+
+        for forward_m, sx, sy, distance_m, stamp in projected.values():
             age = max(0.0, now - stamp)
             recent = max(0.0, 1.0 - age / self._fade_reference_s)
-            depth = min(1.0, max(0.0, forward_m / max(distance_m, 0.001)))
+            depth = min(1.0, max(0.0, abs(forward_m) / max(distance_m, 0.001)))
             alpha = int(65 + 155 * recent)
             red = int(55 + 80 * (1.0 - depth))
             green = int(150 + 75 * recent)
@@ -325,7 +347,8 @@ class Lidar3DPanel(QGroupBox):
         self._hud = HudStrip()
         self._caption = QLabel(
             "The map view is fixed. IMU roll/pitch levels the scan, IMU yaw predicts short motion, and LiDAR "
-            "scan matching corrects yaw/xy before points are accumulated."
+            "scan matching corrects yaw/xy before points are accumulated. The wall view filters near-level "
+            "z=0 slices so horizontal scans do not smear into a fake wall."
         )
         self._caption.setStyleSheet("color: #8AA0B6;")
         self._caption.setWordWrap(True)
